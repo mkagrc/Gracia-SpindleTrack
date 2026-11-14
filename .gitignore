@@ -1,0 +1,21 @@
+# Secrets and local environment
+.env
+**/.env
+!.env.example
+
+# Java / Maven
+**/target/
+backend/.mvn/wrapper/dists/
+backend/.mvn/repository/
+
+# Node / Vite
+**/node_modules/
+**/dist/
+frontend/.npm-cache/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
