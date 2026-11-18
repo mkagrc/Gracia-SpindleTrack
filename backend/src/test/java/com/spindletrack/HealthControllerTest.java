@@ -5,6 +5,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.spindletrack.auth.FirebaseTokenVerifier;
+import com.spindletrack.auth.UserAccountRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -21,6 +22,9 @@ class HealthControllerTest {
 
     @MockitoBean
     private FirebaseTokenVerifier firebaseTokenVerifier;
+
+    @MockitoBean
+    private UserAccountRepository userAccountRepository;
 
     @Test
     void healthEndpointIsPublicAndReportsApiStatus() throws Exception {
