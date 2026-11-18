@@ -58,6 +58,30 @@ class AuthServiceTest {
         assertEquals("Please use another account.", exception.getReason());
     }
 
+    @Test
+    void ownerAndStaffSessionsIncludeShopIdentity() {
+        FirebaseIdentity identity = new FirebaseIdentity("owner-uid", "owner@example.com", "Shop Owner");
+        UserAccount owner = new UserAccount(12L, "owner-uid", "Shop Owner", identity.email(), "OWNER", true, 44L, "ACTIVE");
+        when(users.findByFirebaseUid(identity.uid())).thenReturn(Optional.of(owner));
+        when(users.findShopName(44L)).thenReturn(Optional.of("Bright Laundry"));
+        AuthSessionResponse response = new AuthService(users, "").createOrLoadSession(identity);
+        assertEquals(44L, response.shop().id());
+        assertEquals("Bright Laundry", response.shop().name());
+        assertEquals("ACTIVE", response.shop().status());
+    }
+
+    @Test
+    void staffSessionIncludesItsAssignedShopIdentity() {
+        FirebaseIdentity identity = new FirebaseIdentity("staff-uid", "staff@example.com", "Staff Member");
+        UserAccount staff = new UserAccount(13L, "staff-uid", "Staff Member", identity.email(), "STAFF", true, 45L, "ACTIVE");
+        when(users.findByFirebaseUid(identity.uid())).thenReturn(Optional.of(staff));
+        when(users.findShopName(45L)).thenReturn(Optional.of("Staff Shop"));
+        AuthSessionResponse response = new AuthService(users, "").createOrLoadSession(identity);
+        assertEquals("STAFF", response.role());
+        assertEquals(45L, response.shop().id());
+        assertEquals("Staff Shop", response.shop().name());
+    }
+
     private static UserAccount account(String uid, String email, String role, Long shopId) {
         return new UserAccount(9L, uid, "Account", email, role, true, shopId, null);
     }

@@ -37,6 +37,11 @@ public class UserAccountRepository {
         return findOne(SELECT_ACCOUNT + " WHERE LOWER(u.email) = LOWER(?)", email);
     }
 
+    public Optional<String> findShopName(long shopId) {
+        List<String> names = jdbcTemplate.query("SELECT name FROM shops WHERE id = ?", (rs, rowNum) -> rs.getString(1), shopId);
+        return names.stream().findFirst();
+    }
+
     public void insertFirebaseUser(String uid, String fullName, String email, String role) {
         jdbcTemplate.update("""
                 INSERT INTO users (firebase_uid, full_name, email, role, is_active, shop_id)

@@ -6,5 +6,7 @@ public record AuthSessionResponse(
         String email,
         String role,
         Long shopId,
-        String shopStatus) {
+        String shopStatus,
+        ShopInfo shop) {
+    public record ShopInfo(long id, String name, String status) {}
 }

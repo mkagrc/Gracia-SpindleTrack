@@ -55,8 +55,13 @@ public class AuthService {
             account = users.findByFirebaseUid(identity.uid()).orElseThrow();
         }
 
+        AuthSessionResponse.ShopInfo shop = null;
+        if (account.shopId() != null && ("OWNER".equals(account.role()) || "STAFF".equals(account.role()))) {
+            shop = new AuthSessionResponse.ShopInfo(account.shopId(),
+                    users.findShopName(account.shopId()).orElse(""), account.shopStatus());
+        }
         return new AuthSessionResponse(
-                account.id(), account.fullName(), account.email(), account.role(), account.shopId(), account.shopStatus());
+                account.id(), account.fullName(), account.email(), account.role(), account.shopId(), account.shopStatus(), shop);
     }
 
     private boolean isAdminEmail(String email) {
