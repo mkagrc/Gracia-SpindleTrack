@@ -64,6 +64,13 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
                 writeError(response, HttpStatus.FORBIDDEN, "This account is inactive.");
                 return;
             }
+            if (account != null
+                    && !ShopOperationPolicy.mayUseShopOperations(
+                            account.role(), account.shopStatus(), request.getMethod(), request.getServletPath())) {
+                SecurityContextHolder.clearContext();
+                writeShopStatusError(response, ShopOperationPolicy.blockedMessage(account.shopStatus()));
+                return;
+            }
 
             List<SimpleGrantedAuthority> authorities = new ArrayList<>();
             authorities.add(new SimpleGrantedAuthority("ROLE_AUTHENTICATED"));
@@ -88,6 +95,14 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
             SecurityContextHolder.clearContext();
             writeError(response, exception.getStatus(), exception.getMessage());
         }
+    }
+
+    private void writeShopStatusError(HttpServletResponse response, String message) throws IOException {
+        response.setStatus(HttpStatus.FORBIDDEN.value());
+        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        objectMapper.writeValue(response.getOutputStream(), Map.of(
+                "code", "SHOP_NOT_ACTIVE",
+                "message", message));
     }
 
     private void writeError(HttpServletResponse response, HttpStatus status, String message) throws IOException {
