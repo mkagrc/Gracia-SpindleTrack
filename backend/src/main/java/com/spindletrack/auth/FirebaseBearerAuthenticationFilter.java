@@ -10,6 +10,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -24,12 +25,14 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
     private final FirebaseTokenVerifier tokenVerifier;
     private final UserAccountRepository userAccounts;
     private final ObjectMapper objectMapper;
+    private final String adminEmail;
 
     public FirebaseBearerAuthenticationFilter(FirebaseTokenVerifier tokenVerifier, UserAccountRepository userAccounts,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, @Value("${spindletrack.auth.admin-email:}") String adminEmail) {
         this.tokenVerifier = tokenVerifier;
         this.userAccounts = userAccounts;
         this.objectMapper = objectMapper;
+        this.adminEmail = adminEmail == null ? "" : adminEmail.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
     @Override
@@ -53,6 +56,12 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
         try {
             FirebaseIdentity identity = tokenVerifier.verify(rawToken);
             UserAccount account = userAccounts.findByFirebaseUid(identity.uid()).orElse(null);
+            if (account != null && "PLATFORM_ADMIN".equals(account.role())
+                    && (adminEmail.isBlank() || !adminEmail.equals(identity.email() == null ? ""
+                            : identity.email().trim().toLowerCase(java.util.Locale.ROOT)))) {
+                writeError(response, HttpStatus.FORBIDDEN, "This account is not configured as the platform administrator.");
+                return;
+            }
             if (account != null && !account.active()) {
                 writeError(response, HttpStatus.FORBIDDEN, "This account is inactive.");
                 return;

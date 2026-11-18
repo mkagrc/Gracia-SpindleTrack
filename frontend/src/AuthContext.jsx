@@ -7,10 +7,17 @@ import {
   signInWithPopup,
   signOut as firebaseSignOut,
 } from 'firebase/auth';
+import { onDisconnect, ref, serverTimestamp, set } from 'firebase/database';
 import api, { apiErrorMessage } from './api.js';
-import { auth, firebaseConfigReady, googleProvider } from './firebase.js';
+import { auth, database, firebaseConfigReady, googleProvider } from './firebase.js';
 
 const AuthContext = createContext(null);
+const PRESENCE_GROUP = {
+  PLATFORM_ADMIN: 'admin',
+  OWNER: 'owners',
+  STAFF: 'staff',
+  CUSTOMER: 'customers',
+};
 
 export function AuthProvider({ children }) {
   const [firebaseUser, setFirebaseUser] = useState(null);
@@ -18,6 +25,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [sessionError, setSessionError] = useState('');
   const inFlight = useRef(new Map());
+  const sessionUid = useRef(null);
 
   const syncSession = useCallback((user) => {
     if (!user) return Promise.reject(new Error('Sign in before continuing.'));
@@ -33,11 +41,13 @@ export function AuthProvider({ children }) {
 
     const request = api.post('/api/auth/session')
       .then(({ data }) => {
+        sessionUid.current = user.uid;
         setSession(data);
         setSessionError('');
         return data;
       })
       .catch((error) => {
+        sessionUid.current = null;
         const message = apiErrorMessage(error, 'Could not establish your account session.');
         setSession(null);
         setSessionError(message);
@@ -51,8 +61,11 @@ export function AuthProvider({ children }) {
 
   useEffect(() => onAuthStateChanged(auth, (user) => {
     setFirebaseUser(user);
-    if (!user) {
+    if (!user || sessionUid.current !== user.uid) {
+      sessionUid.current = null;
       setSession(null);
+    }
+    if (!user) {
       setSessionError('');
       setLoading(false);
       return;
@@ -66,6 +79,39 @@ export function AuthProvider({ children }) {
     setLoading(true);
     syncSession(user).catch(() => {}).finally(() => setLoading(false));
   }), [syncSession]);
+
+  useEffect(() => {
+    if (!database || !firebaseUser || !session || sessionUid.current !== firebaseUser.uid) return undefined;
+    const group = PRESENCE_GROUP[session.role];
+    if (!group) return undefined;
+
+    let stopped = false;
+    let presenceRef;
+    let disconnectRegistration;
+    const shopId = session.shopId || session.shop?.id || null;
+    const extra = session.role === 'STAFF' && shopId ? { shopId } : {};
+    const offlineValue = { online: false, lastSeen: serverTimestamp(), ...extra };
+
+    (async () => {
+      try {
+        // Session creation minted these server-authoritative claims; refresh before RTDB rules evaluate access.
+        await firebaseUser.getIdToken(true);
+        if (stopped) return;
+        presenceRef = ref(database, `presence/${group}/${firebaseUser.uid}`);
+        disconnectRegistration = onDisconnect(presenceRef);
+        await disconnectRegistration.set(offlineValue);
+        if (!stopped) await set(presenceRef, { online: true, lastSeen: serverTimestamp(), ...extra });
+      } catch {
+        // Presence is best-effort; RTDB rules never replace backend API authorization.
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      if (disconnectRegistration) void disconnectRegistration.cancel().catch(() => {});
+      if (presenceRef) void set(presenceRef, offlineValue).catch(() => {});
+    };
+  }, [firebaseUser, session]);
 
   const signInGoogle = async () => {
     if (!firebaseConfigReady) throw new Error('Firebase frontend configuration is incomplete.');

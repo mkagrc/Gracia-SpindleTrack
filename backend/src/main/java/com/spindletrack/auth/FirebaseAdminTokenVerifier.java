@@ -3,6 +3,7 @@ package com.spindletrack.auth;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.Map;
 
 import com.google.auth.oauth2.GoogleCredentials;
@@ -13,6 +14,7 @@ import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
 import com.google.firebase.auth.FirebaseToken;
 import com.google.firebase.cloud.FirestoreClient;
+import com.google.firebase.database.FirebaseDatabase;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -21,12 +23,16 @@ import org.springframework.stereotype.Component;
 public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
     private static final String APP_NAME = "spindletrack-auth";
     private final String serviceAccountPath;
+    private final String databaseUrl;
     private volatile FirebaseApp firebaseApp;
     private volatile FirebaseAuth firebaseAuth;
+    private volatile FirebaseDatabase firebaseDatabase;
 
     public FirebaseAdminTokenVerifier(
-            @Value("${spindletrack.firebase.service-account-path:}") String serviceAccountPath) {
+            @Value("${spindletrack.firebase.service-account-path:}") String serviceAccountPath,
+            @Value("${spindletrack.firebase.database-url:}") String databaseUrl) {
         this.serviceAccountPath = serviceAccountPath;
+        this.databaseUrl = databaseUrl == null ? "" : databaseUrl.trim();
     }
 
     @Override
@@ -37,34 +43,48 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         } catch (FirebaseAuthenticationException exception) {
             throw exception;
         } catch (FirebaseAuthException exception) {
-            throw new FirebaseAuthenticationException(
-                    HttpStatus.UNAUTHORIZED, "The Firebase ID token is invalid or expired.");
+            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "The Firebase ID token is invalid or expired.");
         }
     }
 
     static FirebaseIdentity identityFromClaims(String uid, Map<String, Object> claims) {
         String email = stringClaim(claims, "email");
         if (!Boolean.TRUE.equals(claims.get("email_verified"))) {
-            throw new FirebaseAuthenticationException(
-                    HttpStatus.UNAUTHORIZED, "Please verify your email address before signing in.");
+            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "Please verify your email address before signing in.");
         }
         if (email == null || email.isBlank()) {
-            throw new FirebaseAuthenticationException(
-                    HttpStatus.UNAUTHORIZED, "The Firebase account does not have a verified email address.");
+            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "The Firebase account does not have a verified email address.");
         }
         return new FirebaseIdentity(uid, email.trim(), stringClaim(claims, "name"));
     }
 
-    Firestore firestore() {
-        return FirestoreClient.getFirestore(firebaseApp());
+    Firestore firestore() { return FirestoreClient.getFirestore(firebaseApp()); }
+    FirebaseDatabase realtimeDatabase() {
+        if (databaseUrl.isBlank()) throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase Realtime Database is not configured. Set FIREBASE_DATABASE_URL.");
+        FirebaseDatabase current = firebaseDatabase;
+        if (current != null) return current;
+        synchronized (this) {
+            if (firebaseDatabase == null) firebaseDatabase = FirebaseDatabase.getInstance(firebaseApp(), databaseUrl);
+            return firebaseDatabase;
+        }
+    }
+
+    void setSessionClaims(String uid, String role, String shopId) {
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("role", role);
+        if (shopId != null && !shopId.isBlank()) claims.put("shopId", shopId);
+        try {
+            firebaseAuth().setCustomUserClaims(uid, claims);
+        } catch (FirebaseAuthException exception) {
+            throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase authorization claims could not be refreshed.");
+        }
     }
 
     private FirebaseAuth firebaseAuth() {
         FirebaseAuth current = firebaseAuth;
         if (current != null) return current;
         synchronized (this) {
-            if (firebaseAuth != null) return firebaseAuth;
-            firebaseAuth = FirebaseAuth.getInstance(firebaseApp());
+            if (firebaseAuth == null) firebaseAuth = FirebaseAuth.getInstance(firebaseApp());
             return firebaseAuth;
         }
     }
@@ -75,32 +95,27 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         synchronized (this) {
             if (firebaseApp != null) return firebaseApp;
             if (serviceAccountPath == null || serviceAccountPath.isBlank()) {
-                throw new FirebaseAuthenticationException(
-                        HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication is not configured on the server.");
+                throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication is not configured on the server.");
             }
             try {
-                firebaseApp = FirebaseApp.getApps().stream()
-                        .filter(existing -> APP_NAME.equals(existing.getName()))
+                firebaseApp = FirebaseApp.getApps().stream().filter(existing -> APP_NAME.equals(existing.getName()))
                         .findFirst().orElseGet(this::initializeFirebaseApp);
                 return firebaseApp;
             } catch (FirebaseAuthenticationException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
-                throw new FirebaseAuthenticationException(
-                        HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication could not be initialized.");
+                throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication could not be initialized.");
             }
         }
     }
 
     private FirebaseApp initializeFirebaseApp() {
         try (var input = Files.newInputStream(Path.of(serviceAccountPath))) {
-            FirebaseOptions options = FirebaseOptions.builder()
-                    .setCredentials(GoogleCredentials.fromStream(input))
-                    .build();
-            return FirebaseApp.initializeApp(options, APP_NAME);
+            FirebaseOptions.Builder options = FirebaseOptions.builder().setCredentials(GoogleCredentials.fromStream(input));
+            if (!databaseUrl.isBlank()) options.setDatabaseUrl(databaseUrl);
+            return FirebaseApp.initializeApp(options.build(), APP_NAME);
         } catch (IOException | RuntimeException exception) {
-            throw new FirebaseAuthenticationException(
-                    HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication could not be initialized.");
+            throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication could not be initialized.");
         }
     }
 

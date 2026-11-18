@@ -1,0 +1,37 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "presence": {
+      ".read": "auth != null && auth.token.role == 'PLATFORM_ADMIN'",
+      ".write": false,
+      "admin": {
+        "$uid": {
+          ".write": "auth != null && auth.uid == $uid && auth.token.role == 'PLATFORM_ADMIN'",
+          ".validate": "newData.hasChildren(['online', 'lastSeen']) && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber() && !newData.child('shopId').exists()"
+        }
+      },
+      "owners": {
+        "$uid": {
+          ".read": "auth != null && auth.token.role == 'OWNER' && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && auth.token.role == 'OWNER'",
+          ".validate": "newData.hasChildren(['online', 'lastSeen']) && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber() && !newData.child('shopId').exists()"
+        }
+      },
+      "staff": {
+        "$uid": {
+          ".read": "auth != null && ((auth.token.role == 'STAFF' && auth.uid == $uid) || (auth.token.role == 'OWNER' && auth.token.shopId != null && data.child('shopId').val() == auth.token.shopId))",
+          ".write": "auth != null && auth.uid == $uid && auth.token.role == 'STAFF' && auth.token.shopId != null && newData.child('shopId').val() == auth.token.shopId",
+          ".validate": "newData.hasChildren(['online', 'lastSeen', 'shopId']) && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber() && newData.child('shopId').isString()"
+        }
+      },
+      "customers": {
+        "$uid": {
+          ".read": "auth != null && auth.token.role == 'CUSTOMER' && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && auth.token.role == 'CUSTOMER'",
+          ".validate": "newData.hasChildren(['online', 'lastSeen']) && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber() && !newData.child('shopId').exists()"
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,7 @@ class AuthServiceTest {
         when(users.findByEmail(identity.email())).thenReturn(Optional.empty());
         AuthSessionResponse response = new AuthService(users, " admin@example.com ").createOrLoadSession(identity);
         verify(users).insertFirebaseUser(identity.uid(), "Platform Admin", identity.email(), "PLATFORM_ADMIN");
+        verify(users).setSessionClaims(identity.uid(), "PLATFORM_ADMIN", null);
         assertEquals("PLATFORM_ADMIN", response.role());
         assertEquals(null, response.shopId());
     }
@@ -37,6 +38,7 @@ class AuthServiceTest {
         when(users.findByEmail(identity.email())).thenReturn(Optional.empty());
         AuthSessionResponse response = new AuthService(users, "admin@example.com").createOrLoadSession(identity);
         verify(users).insertFirebaseUser(identity.uid(), "New Customer", identity.email(), "CUSTOMER");
+        verify(users).setSessionClaims(identity.uid(), "CUSTOMER", null);
         assertEquals("CUSTOMER", response.role());
         assertEquals("user-9", response.userId());
     }
@@ -62,6 +64,7 @@ class AuthServiceTest {
         assertEquals("shop-44", response.shop().id());
         assertEquals("Bright Laundry", response.shop().name());
         assertEquals("ACTIVE", response.shop().status());
+        verify(users).setSessionClaims(identity.uid(), "OWNER", "shop-44");
     }
 
     @Test
@@ -72,6 +75,7 @@ class AuthServiceTest {
         when(users.findShopName("shop-45")).thenReturn(Optional.of("Staff Shop"));
         AuthSessionResponse response = new AuthService(users, "").createOrLoadSession(identity);
         assertEquals("STAFF", response.role());
+        verify(users).setSessionClaims(identity.uid(), "STAFF", "shop-45");
         assertEquals("shop-45", response.shop().id());
         assertEquals("Staff Shop", response.shop().name());
     }

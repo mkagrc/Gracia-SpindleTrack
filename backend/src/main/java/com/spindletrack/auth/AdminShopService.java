@@ -58,7 +58,7 @@ public class AdminShopService {
         for (QueryDocumentSnapshot shop : shopDocs) {
             List<QueryDocumentSnapshot> attached = usersByShop.getOrDefault(shop.getId(), List.of());
             QueryDocumentSnapshot ownerDoc = attached.stream().filter(user -> "OWNER".equals(user.getString("role"))).findFirst().orElse(null);
-            String ownerName = ownerDoc == null ? null : ownerDoc.getString("fullName");
+            String ownerName = ownerDoc == null ? null : userName(ownerDoc);
             String ownerEmail = ownerDoc == null ? null : ownerDoc.getString("email");
             if (!term.isEmpty() && !contains(shop.getString("name"), term) && !contains(ownerName, term) && !contains(ownerEmail, term)) continue;
             int staffCount = (int) attached.stream().filter(user -> "STAFF".equals(user.getString("role"))).count();
@@ -81,9 +81,9 @@ public class AdminShopService {
         if (!shop.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
         List<QueryDocumentSnapshot> attached = FirestoreSupport.await(db.collection("users").whereEqualTo("shopId", id).get()).getDocuments();
         QueryDocumentSnapshot ownerDoc = attached.stream().filter(user -> "OWNER".equals(user.getString("role"))).findFirst().orElse(null);
-        Owner owner = ownerDoc == null ? null : new Owner(ownerDoc.getId(), ownerDoc.getString("fullName"), ownerDoc.getString("email"));
+        Owner owner = ownerDoc == null ? null : new Owner(ownerDoc.getId(), userName(ownerDoc), ownerDoc.getString("email"));
         List<ShopStaff> staff = attached.stream().filter(user -> "STAFF".equals(user.getString("role")))
-                .map(user -> new ShopStaff(user.getId(), user.getString("fullName"), user.getString("email"),
+                .map(user -> new ShopStaff(user.getId(), userName(user), user.getString("email"),
                         Boolean.TRUE.equals(user.getBoolean("active")) ? "ACTIVE" : "INACTIVE"))
                 .sorted(Comparator.comparing(ShopStaff::name, Comparator.nullsLast(String::compareToIgnoreCase))).toList();
         return new ShopDetail(id, shop.getString("name"), shop.getString("address"), shop.getString("contactNumber"),
@@ -130,5 +130,10 @@ public class AdminShopService {
 
     private static boolean contains(String value, String term) {
         return value != null && value.toLowerCase(Locale.ROOT).contains(term);
+    }
+
+    private static String userName(DocumentSnapshot user) {
+        String displayName = user.getString("displayName");
+        return displayName == null ? user.getString("fullName") : displayName;
     }
 }
