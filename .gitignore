@@ -5,6 +5,7 @@
 
 # Java / Maven
 **/target/
+**/.work/
 backend/.mvn/wrapper/dists/
 backend/.mvn/repository/
 

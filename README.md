@@ -1,48 +1,22 @@
 # SpindleTrack
 
-Initial project scaffold for a laundry-shop order management, payment tracking, and customer notification system.
+Laundry-shop registration and operations foundation using Spring Boot, React, Firebase Authentication, and MySQL.
 
-## Stack
+## Stack and prerequisites
 
-- Backend: Java 21, Spring Boot 3.5, Maven, Spring Web/Security/Data JPA/Validation/Scheduling, Flyway, MySQL 8
-- Frontend: React, Vite, React Router, Axios, Tailwind CSS, Recharts, lucide-react
-- Database choice: MySQL (confirmed)
+The backend uses Java 21, Spring Boot 3.5, Maven, Spring Security, JDBC/JPA, Flyway, MySQL 8, and Firebase Admin Java. The frontend uses React, Vite, Firebase Authentication, Axios, Tailwind CSS, and lucide-react. Java 21, Node.js, npm, and Git are expected on the development PC. MySQL is configured for port 3307 in the local example.
 
-## Prerequisites
+## Local configuration
 
-- Java 17 or newer (Java 21 was detected)
-- Node.js and npm (Node.js 24 and npm 11 were detected)
-- Git
-- MySQL 8 server reachable from the backend
+Keep both local `.env` files and the Firebase service-account JSON out of Git. The repository ignores local `.env` files. Do not replace an existing `.env` with an example file. For a new checkout, copy the checked-in examples and fill in values locally.
 
-The machine reports a running `MySQL80` Windows service, but the local connection check to `127.0.0.1:3306` did not respond. Confirm the server is configured to listen on that port, or update `DB_URL` to its configured port. The MySQL command-line client was not found in PATH. No system software or MySQL settings were changed by this setup.
+The backend `.env` uses `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `SERVER_PORT`, `FIREBASE_SERVICE_ACCOUNT_PATH`, and `ADMIN_EMAIL`. Set `FIREBASE_SERVICE_ACCOUNT_PATH` to the local service-account file path; do not put the JSON contents in `.env`. The verified account matching `ADMIN_EMAIL` is created or promoted to `PLATFORM_ADMIN` on its first successful session.
 
-Maven was not found in PATH. `backend/mvnw.cmd` bootstraps Apache Maven 3.9.11 into `backend/.mvn/wrapper/dists` and stores Maven dependencies in `backend/.mvn/repository`; this keeps the tool and dependencies project-local rather than installing Maven system-wide.
+The frontend `.env` uses `VITE_API_BASE_URL`, `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, and `VITE_FIREBASE_APP_ID`. Firebase Google and Email/Password providers must be enabled. Email/Password accounts must verify their email before the backend will create a session. Firebase Analytics is not used. The backend allows local browser origins at `http://localhost:5173` and `http://127.0.0.1:5173`.
 
-## Database setup
+## Run and test
 
-Create a database and a least-privilege local application user using MySQL Workbench or another MySQL administration client. For example, run the following SQL in your local MySQL administrator session, replacing the example password locally:
-
-```sql
-CREATE DATABASE spindletrack CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-CREATE USER 'spindletrack'@'localhost' IDENTIFIED BY 'replace-with-a-local-password';
-GRANT ALL PRIVILEGES ON spindletrack.* TO 'spindletrack'@'localhost';
-```
-
-Do not commit credentials. From the project root, create local environment files from the checked-in examples (skip any copy whose `.env` already exists):
-
-```powershell
-if (-not (Test-Path backend/.env)) { Copy-Item backend/.env.example backend/.env }
-if (-not (Test-Path frontend/.env)) { Copy-Item frontend/.env.example frontend/.env }
-```
-
-Edit `backend/.env` with the local MySQL URL, username, and password. The `.env` files are ignored by Git. Flyway applies the schema and seed migrations automatically when the backend connects for the first time.
-
-Seeded test identities include `owner@spindletrack.test`, `staff1@spindletrack.test`, and `staff2@spindletrack.test`. These are database sample rows only; Google/Firebase authentication has not been connected, and these are not usable login accounts.
-
-## Run the backend (PowerShell)
-
-From the project root, in the backend terminal:
+From PowerShell, start the backend:
 
 ```powershell
 Set-Location backend
@@ -50,20 +24,28 @@ Set-Location backend
 .\mvnw.cmd spring-boot:run
 ```
 
-The API health endpoint is `http://localhost:8080/api/health`. The application cannot complete startup unless the MySQL server, database, and local `.env` connection values are ready.
+Flyway applies new migrations at startup. The backend listens at `http://localhost:8080`; the health endpoint is `http://localhost:8080/api/health`.
 
-## Run the frontend (PowerShell)
-
-In a second terminal, from the project root:
+In another PowerShell terminal, build or start the frontend:
 
 ```powershell
 Set-Location frontend
-npm.cmd install --cache .npm-cache
+npm.cmd run build
 npm.cmd run dev
 ```
 
-Vite serves the starter UI at `http://127.0.0.1:5173`. `npm.cmd` is used because this computer's PowerShell execution policy blocks the `npm.ps1` shim.
+The frontend is served at `http://localhost:5173` (Vite is bound to the local loopback interface). `npm.cmd` is used because PowerShell may block the `npm.ps1` shim under the local execution policy.
 
-## Initial scope
+## Step 2 scope and manual checks
 
-This step establishes the project structure, configuration, schema, seed data, and starter screens. The six laundry stages are ordered in the backend domain enum and covered by unit tests. Customer/staff/owner workflows, Firebase token verification, PayMongo test-mode payments and signed webhook processing, Brevo email delivery, scheduled unclaimed-order handling, reports, and production role authorization remain for subsequent implementation steps. No live payment integration is configured.
+The backend verifies Firebase ID tokens, rejects unverified email claims, creates a local session at `POST /api/auth/session`, bootstraps the configured platform administrator, and applies role checks. A customer account may register a shop only if it is not already a shop user and has no attached laundry orders. Shop registration collects the shop name, address, and contact number only; new shops start as `PENDING`. The database limits registration attempts to three per IP address per UTC day. Document upload is deferred to the next step.
+
+Manual checks after starting both applications:
+
+1. Sign in with Google and confirm a successful session and the expected local role.
+2. Sign in with the verified account configured by `ADMIN_EMAIL` and confirm the returned role is `PLATFORM_ADMIN`.
+3. Create an Email/Password account, verify its email, then sign in and confirm an unverified account is rejected.
+4. As an eligible customer with no attached orders, submit a shop registration and confirm it becomes `PENDING` and the status page shows the submitted details.
+5. Confirm an owner, staff member, platform administrator, or customer with attached orders is blocked from registering another shop. Confirm the daily per-IP rate limit rejects further attempts after three.
+
+The legacy V1 and V2 migrations remain immutable. V3 adds tenancy and the demo shop; V4 adds durable rate-limit counters. Existing demo rows are sample data without Firebase UIDs and cannot be claimed by ordinary Firebase sign-ins.
