@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.security.access.AccessDeniedException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -43,4 +44,10 @@ public class ApiExceptionHandler {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Map.of("message", "The request could not be completed. Please try again."));
     }
+
+    @ExceptionHandler(AccessDeniedException.class)
+public ResponseEntity<Map<String, String>> handleAccessDenied(AccessDeniedException ex) {
+    return ResponseEntity.status(403)
+            .body(Map.of("message", "You do not have permission to do this."));
+}
 }
