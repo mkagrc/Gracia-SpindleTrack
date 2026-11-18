@@ -41,7 +41,8 @@ public class UserPresenceService {
                 .filter(doc -> filter == null || filter.equals(doc.getString("role")))
                 .sorted(Comparator.comparing(UserPresenceService::name, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER))).toList();
         Map<String, Map<String, PresenceStore.Entry>> groups = filtered.stream().map(doc -> doc.getString("role"))
-                .filter(ROLES::contains).distinct().collect(Collectors.toMap(PresencePath::groupForRole, presence::readGroup));
+                .filter(ROLES::contains).map(PresencePath::groupForRole).distinct()
+                .collect(Collectors.toMap(group -> group, presence::readGroup));
         List<AdminUser> users = new ArrayList<>();
         for (QueryDocumentSnapshot doc : filtered) {
             String roleValue = doc.getString("role");
