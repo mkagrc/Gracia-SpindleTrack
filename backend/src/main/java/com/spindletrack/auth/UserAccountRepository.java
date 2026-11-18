@@ -1,111 +1,176 @@
 package com.spindletrack.auth;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
+import com.google.cloud.firestore.DocumentReference;
+import com.google.cloud.firestore.DocumentSnapshot;
+import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.Transaction;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Repository;
+import org.springframework.web.server.ResponseStatusException;
 
 @Repository
 public class UserAccountRepository {
-    private static final String SELECT_ACCOUNT = """
-            SELECT u.id, u.firebase_uid, u.full_name, u.email, u.role, u.is_active, u.shop_id,
-                   s.status AS shop_status
-            FROM users u
-            LEFT JOIN shops s ON s.id = u.shop_id
-            """;
+    private static final String USERS = "users";
+    private static final String SHOPS = "shops";
+    private static final String LOOKUPS = "userIdentityLookups";
+    private final FirebaseAdminTokenVerifier firebase;
 
-    private static final RowMapper<UserAccount> ACCOUNT_MAPPER = UserAccountRepository::mapAccount;
-    private final JdbcTemplate jdbcTemplate;
-
-    public UserAccountRepository(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+    public UserAccountRepository(FirebaseAdminTokenVerifier firebase) {
+        this.firebase = firebase;
     }
 
     public Optional<UserAccount> findByFirebaseUid(String uid) {
-        return findOne(SELECT_ACCOUNT + " WHERE u.firebase_uid = ?", uid);
-    }
-
-    public Optional<UserAccount> findByFirebaseUidForUpdate(String uid) {
-        return findOne(SELECT_ACCOUNT + " WHERE u.firebase_uid = ? FOR UPDATE", uid);
+        return findByLookup("uid", uid);
     }
 
     public Optional<UserAccount> findByEmail(String email) {
-        return findOne(SELECT_ACCOUNT + " WHERE LOWER(u.email) = LOWER(?)", email);
+        return findByLookup("email", normalizeEmail(email));
     }
 
-    public Optional<String> findShopName(long shopId) {
-        List<String> names = jdbcTemplate.query("SELECT name FROM shops WHERE id = ?", (rs, rowNum) -> rs.getString(1), shopId);
-        return names.stream().findFirst();
+    public Optional<String> findShopName(String shopId) {
+        if (shopId == null) return Optional.empty();
+        DocumentSnapshot shop = FirestoreSupport.await(firebase.firestore().collection(SHOPS).document(shopId).get());
+        return shop.exists() ? Optional.ofNullable(shop.getString("name")) : Optional.empty();
     }
 
     public void insertFirebaseUser(String uid, String fullName, String email, String role) {
-        jdbcTemplate.update("""
-                INSERT INTO users (firebase_uid, full_name, email, role, is_active, shop_id)
-                VALUES (?, ?, ?, ?, TRUE, NULL)
-                """, uid, fullName, email, role);
+        Firestore db = firebase.firestore();
+        String normalized = normalizeEmail(email);
+        FirestoreSupport.transact(db, tx -> {
+            DocumentReference uidLookup = lookup("uid", uid);
+            DocumentReference emailLookup = lookup("email", normalized);
+            DocumentSnapshot uidExisting = FirestoreSupport.await(tx.get(uidLookup));
+            DocumentSnapshot emailExisting = FirestoreSupport.await(tx.get(emailLookup));
+            if (uidExisting.exists() || emailExisting.exists()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Please use another account.");
+            }
+            DocumentReference user = db.collection(USERS).document();
+            Map<String, Object> data = new HashMap<>();
+            data.put("firebaseUid", uid);
+            data.put("fullName", fullName);
+            data.put("email", normalized);
+            data.put("role", role);
+            data.put("active", true);
+            data.put("shopId", null);
+            data.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            data.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.create(user, data);
+            tx.create(uidLookup, Map.of("userId", user.getId()));
+            tx.create(emailLookup, Map.of("userId", user.getId()));
+            return null;
+        });
     }
 
-    public void bindAndPromotePlatformAdmin(long userId, String uid, String fullName, String email) {
-        jdbcTemplate.update("""
-                UPDATE users
-                SET firebase_uid = ?, full_name = ?, email = ?, role = 'PLATFORM_ADMIN', shop_id = NULL
-                WHERE id = ?
-                """, uid, fullName, email, userId);
+    public void bindAndPromotePlatformAdmin(String userId, String uid, String fullName, String email) {
+        Firestore db = firebase.firestore();
+        FirestoreSupport.transact(db, tx -> {
+            DocumentReference user = db.collection(USERS).document(userId);
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(user));
+            if (!current.exists()) throw new ResponseStatusException(HttpStatus.CONFLICT, "Please use another account.");
+            String normalized = normalizeEmail(email);
+            DocumentReference uidLookup = lookup("uid", uid);
+            DocumentReference emailLookup = lookup("email", normalized);
+            DocumentSnapshot uidExisting = FirestoreSupport.await(tx.get(uidLookup));
+            DocumentSnapshot emailExisting = FirestoreSupport.await(tx.get(emailLookup));
+            if ((uidExisting.exists() && !userId.equals(uidExisting.getString("userId")))
+                    || (emailExisting.exists() && !userId.equals(emailExisting.getString("userId")))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Please use another account.");
+            }
+            tx.update(user, Map.of("firebaseUid", uid, "fullName", fullName, "email", normalized,
+                    "role", "PLATFORM_ADMIN", "shopId", com.google.cloud.firestore.FieldValue.delete(),
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            tx.set(uidLookup, Map.of("userId", userId));
+            tx.set(emailLookup, Map.of("userId", userId));
+            return null;
+        });
     }
 
-    public void updateIdentity(long userId, String fullName, String email) {
-        jdbcTemplate.update("""
-                UPDATE users
-                SET full_name = ?, email = ?
-                WHERE id = ?
-                """, fullName, email, userId);
+    public void updateIdentity(String userId, String uid, String fullName, String email) {
+        Firestore db = firebase.firestore();
+        FirestoreSupport.transact(db, tx -> {
+            DocumentReference user = db.collection(USERS).document(userId);
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(user));
+            if (!current.exists()) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Sign in before continuing.");
+            String normalized = normalizeEmail(email);
+            String priorEmail = normalizeEmail(current.getString("email"));
+            DocumentReference emailLookup = lookup("email", normalized);
+            DocumentReference uidLookup = lookup("uid", uid);
+            DocumentSnapshot emailExisting = FirestoreSupport.await(tx.get(emailLookup));
+            DocumentSnapshot uidExisting = FirestoreSupport.await(tx.get(uidLookup));
+            if ((emailExisting.exists() && !userId.equals(emailExisting.getString("userId")))
+                    || (uidExisting.exists() && !userId.equals(uidExisting.getString("userId")))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Please use another account.");
+            }
+            if (!priorEmail.isBlank() && !priorEmail.equals(normalized)) tx.delete(lookup("email", priorEmail));
+            tx.set(emailLookup, Map.of("userId", userId));
+            tx.set(uidLookup, Map.of("userId", userId));
+            tx.update(user, Map.of("firebaseUid", uid, "fullName", fullName, "email", normalized,
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return null;
+        });
     }
 
-    public void promotePlatformAdmin(long userId) {
-        jdbcTemplate.update("""
-                UPDATE users
-                SET role = 'PLATFORM_ADMIN', shop_id = NULL
-                WHERE id = ?
-                """, userId);
+    public void promotePlatformAdmin(String userId) {
+        DocumentReference user = firebase.firestore().collection(USERS).document(userId);
+        FirestoreSupport.transact(firebase.firestore(), tx -> {
+            DocumentSnapshot snapshot = FirestoreSupport.await(tx.get(user));
+            if (!snapshot.exists()) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Sign in before continuing.");
+            tx.update(user, Map.of("role", "PLATFORM_ADMIN", "shopId", nullValue(),
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return null;
+        });
     }
 
-    public boolean hasAttachedOrders(long userId) {
-        Boolean hasOrders = jdbcTemplate.queryForObject(
-                "SELECT EXISTS (SELECT 1 FROM laundry_orders WHERE account_user_id = ? LIMIT 1)",
-                Boolean.class,
-                userId);
-        return Boolean.TRUE.equals(hasOrders);
+    private Optional<UserAccount> findByLookup(String kind, String value) {
+        if (value == null || value.isBlank()) return Optional.empty();
+        Firestore db = firebase.firestore();
+        DocumentSnapshot pointer = FirestoreSupport.await(lookup(kind, value).get());
+        if (!pointer.exists()) return Optional.empty();
+        String userId = pointer.getString("userId");
+        if (userId == null) return Optional.empty();
+        DocumentSnapshot user = FirestoreSupport.await(db.collection(USERS).document(userId).get());
+        return user.exists() ? Optional.of(mapAccount(db, user)) : Optional.empty();
     }
 
-    public void convertCustomerToOwner(long userId, long shopId) {
-        jdbcTemplate.update("""
-                UPDATE users
-                SET role = 'OWNER', shop_id = ?
-                WHERE id = ? AND role = 'CUSTOMER' AND shop_id IS NULL
-                """, shopId, userId);
+    private UserAccount mapAccount(Firestore db, DocumentSnapshot snapshot) {
+        String shopId = snapshot.getString("shopId");
+        String shopStatus = null;
+        if (shopId != null) {
+            DocumentSnapshot shop = FirestoreSupport.await(db.collection(SHOPS).document(shopId).get());
+            if (shop.exists()) shopStatus = shop.getString("status");
+        }
+        return new UserAccount(snapshot.getId(), snapshot.getString("firebaseUid"), snapshot.getString("fullName"),
+                snapshot.getString("email"), snapshot.getString("role"), Boolean.TRUE.equals(snapshot.getBoolean("active")),
+                shopId, shopStatus);
     }
 
-    private Optional<UserAccount> findOne(String sql, Object... args) {
-        List<UserAccount> rows = jdbcTemplate.query(sql, ACCOUNT_MAPPER, args);
-        return rows.stream().findFirst();
+    static String normalizeEmail(String email) {
+        return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
     }
 
-    private static UserAccount mapAccount(ResultSet rs, int rowNumber) throws SQLException {
-        long id = rs.getLong("id");
-        long shopIdValue = rs.getLong("shop_id");
-        Long shopId = rs.wasNull() ? null : shopIdValue;
-        return new UserAccount(
-                id,
-                rs.getString("firebase_uid"),
-                rs.getString("full_name"),
-                rs.getString("email"),
-                rs.getString("role"),
-                rs.getBoolean("is_active"),
-                shopId,
-                rs.getString("shop_status"));
+    private DocumentReference lookup(String kind, String value) {
+        return firebase.firestore().collection(LOOKUPS).document(hash(kind + ":" + value));
+    }
+
+    private static String hash(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable.", exception);
+        }
+    }
+
+    private static Object nullValue() {
+        return com.google.cloud.firestore.FieldValue.delete();
     }
 }

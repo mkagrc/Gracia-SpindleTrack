@@ -29,14 +29,14 @@ class AdminShopControllerTest {
     @MockitoBean UserAccountRepository users;
 
     private static UsernamePasswordAuthenticationToken auth(String role) {
-        FirebasePrincipal principal = new FirebasePrincipal("u", "a@example.com", "Admin", 7L, role, null, null);
+        FirebasePrincipal principal = new FirebasePrincipal("u", "a@example.com", "Admin", "user-7", role, null, null);
         return new UsernamePasswordAuthenticationToken(principal, null, List.of(new SimpleGrantedAuthority("ROLE_" + role)));
     }
 
     @Test
     void everyAdminRouteIsForbiddenForOwnerStaffAndCustomer() throws Exception {
-        List<String> gets = List.of("/api/admin/shops", "/api/admin/shops/1");
-        List<String> posts = List.of("/api/admin/shops/1/approve", "/api/admin/shops/1/reject", "/api/admin/shops/1/deactivate", "/api/admin/shops/1/activate");
+        List<String> gets = List.of("/api/admin/shops", "/api/admin/shops/shop-a");
+        List<String> posts = List.of("/api/admin/shops/shop-a/approve", "/api/admin/shops/shop-a/reject", "/api/admin/shops/shop-a/deactivate", "/api/admin/shops/shop-a/activate");
         for (String role : List.of("OWNER", "STAFF", "CUSTOMER")) {
             for (String path : gets) mvc.perform(get(path).with(authentication(auth(role)))).andExpect(status().isForbidden());
             for (String path : posts) {
@@ -51,23 +51,23 @@ class AdminShopControllerTest {
     void platformAdminCanCallAllAdminRoutes() throws Exception {
         when(shops.list(null, null, 0)).thenReturn(new AdminShopService.PageResult(List.of(), 0, 20, 0));
         mvc.perform(get("/api/admin/shops").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
-        mvc.perform(get("/api/admin/shops/1").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
-        mvc.perform(post("/api/admin/shops/1/approve").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
-        mvc.perform(post("/api/admin/shops/1/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"Missing registration\"}")).andExpect(status().isOk());
-        mvc.perform(post("/api/admin/shops/1/deactivate").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
-        mvc.perform(post("/api/admin/shops/1/activate").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
-        verify(shops).transition(1L, "APPROVED", null, 7L);
-        verify(shops).transition(1L, "REJECTED", "Missing registration", 7L);
-        verify(shops).transition(1L, "DEACTIVATED", null, 7L);
-        verify(shops).transition(1L, "ACTIVE", null, 7L);
+        mvc.perform(get("/api/admin/shops/shop-a").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
+        mvc.perform(post("/api/admin/shops/shop-a/approve").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
+        mvc.perform(post("/api/admin/shops/shop-a/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"Missing registration\"}")).andExpect(status().isOk());
+        mvc.perform(post("/api/admin/shops/shop-a/deactivate").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
+        mvc.perform(post("/api/admin/shops/shop-a/activate").with(authentication(auth("PLATFORM_ADMIN")))).andExpect(status().isOk());
+        verify(shops).transition("shop-a", "APPROVED", null, "user-7");
+        verify(shops).transition("shop-a", "REJECTED", "Missing registration", "user-7");
+        verify(shops).transition("shop-a", "DEACTIVATED", null, "user-7");
+        verify(shops).transition("shop-a", "ACTIVE", null, "user-7");
     }
 
     @Test
     void rejectReasonIsRequiredAndLimitedToFiveHundredCharacters() throws Exception {
-        mvc.perform(post("/api/admin/shops/1/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"  \"}"))
+        mvc.perform(post("/api/admin/shops/shop-a/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"  \"}"))
                 .andExpect(status().isBadRequest());
         String tooLong = "x".repeat(501);
-        mvc.perform(post("/api/admin/shops/1/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"" + tooLong + "\"}"))
+        mvc.perform(post("/api/admin/shops/shop-a/reject").with(authentication(auth("PLATFORM_ADMIN"))).contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"" + tooLong + "\"}"))
                 .andExpect(status().isBadRequest());
     }
 }

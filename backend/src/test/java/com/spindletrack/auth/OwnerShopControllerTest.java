@@ -27,29 +27,29 @@ class OwnerShopControllerTest {
     @MockitoBean FirebaseTokenVerifier verifier;
     @MockitoBean UserAccountRepository users;
 
-    private static UsernamePasswordAuthenticationToken auth(String role, Long shopId) {
-        FirebasePrincipal principal = new FirebasePrincipal("uid", "owner@example.com", "Owner", 4L, role, shopId, "ACTIVE");
+    private static UsernamePasswordAuthenticationToken auth(String role, String shopId) {
+        FirebasePrincipal principal = new FirebasePrincipal("uid", "owner@example.com", "Owner", "user-4", role, shopId, "ACTIVE");
         return new UsernamePasswordAuthenticationToken(principal, null, List.of(new SimpleGrantedAuthority("ROLE_" + role)));
     }
 
     @Test
     void ownerCanReadAndEditOnlyProfileAssociatedWithAuthenticatedShop() throws Exception {
-        when(shops.getMine(12L)).thenReturn(new OwnerShopService.ShopProfile(12, "Mine", "Address", "1234567", "ACTIVE"));
-        when(shops.updateMine(org.mockito.ArgumentMatchers.eq(12L), org.mockito.ArgumentMatchers.any()))
-                .thenReturn(new OwnerShopService.ShopProfile(12, "New Name", "New Address", "7654321", "ACTIVE"));
-        mvc.perform(get("/api/shops/mine").with(authentication(auth("OWNER", 12L)))).andExpect(status().isOk());
-        mvc.perform(put("/api/shops/mine").with(authentication(auth("OWNER", 12L))).contentType(MediaType.APPLICATION_JSON)
+        when(shops.getMine("shop-12")).thenReturn(new OwnerShopService.ShopProfile("shop-12", "Mine", "Address", "1234567", "ACTIVE"));
+        when(shops.updateMine(org.mockito.ArgumentMatchers.eq("shop-12"), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new OwnerShopService.ShopProfile("shop-12", "New Name", "New Address", "7654321", "ACTIVE"));
+        mvc.perform(get("/api/shops/mine").with(authentication(auth("OWNER", "shop-12")))).andExpect(status().isOk());
+        mvc.perform(put("/api/shops/mine").with(authentication(auth("OWNER", "shop-12"))).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"name\":\"New Name\",\"address\":\"New Address\",\"contactNumber\":\"7654321\"}"))
                 .andExpect(status().isOk());
-        verify(shops).getMine(12L);
-        verify(shops).updateMine(org.mockito.ArgumentMatchers.eq(12L), org.mockito.ArgumentMatchers.any());
+        verify(shops).getMine("shop-12");
+        verify(shops).updateMine(org.mockito.ArgumentMatchers.eq("shop-12"), org.mockito.ArgumentMatchers.any());
     }
 
     @Test
     void nonOwnersCannotReadOrEditOwnerProfile() throws Exception {
         for (String role : List.of("PLATFORM_ADMIN", "STAFF", "CUSTOMER")) {
-            mvc.perform(get("/api/shops/mine").with(authentication(auth(role, 12L)))).andExpect(status().isForbidden());
-            mvc.perform(put("/api/shops/mine").with(authentication(auth(role, 12L))).contentType(MediaType.APPLICATION_JSON)
+            mvc.perform(get("/api/shops/mine").with(authentication(auth(role, "shop-12")))).andExpect(status().isForbidden());
+            mvc.perform(put("/api/shops/mine").with(authentication(auth(role, "shop-12"))).contentType(MediaType.APPLICATION_JSON)
                     .content("{\"name\":\"Hacked\",\"address\":\"Other\",\"contactNumber\":\"1234567\"}"))
                     .andExpect(status().isForbidden());
         }

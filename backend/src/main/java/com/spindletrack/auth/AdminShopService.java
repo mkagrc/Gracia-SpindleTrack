@@ -1,105 +1,134 @@
 package com.spindletrack.auth;
 
-import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
+import com.google.cloud.firestore.DocumentReference;
+import com.google.cloud.firestore.DocumentSnapshot;
+import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.Query;
+import com.google.cloud.firestore.QueryDocumentSnapshot;
 import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class AdminShopService {
-    private final JdbcTemplate jdbc;
+    private static final int PAGE_SIZE = 20;
+    private final FirebaseAdminTokenVerifier firebase;
     private final ShopDocumentRepository documents;
 
-    public AdminShopService(JdbcTemplate jdbc, ShopDocumentRepository documents) {
-        this.jdbc = jdbc;
+    public AdminShopService(FirebaseAdminTokenVerifier firebase, ShopDocumentRepository documents) {
+        this.firebase = firebase;
         this.documents = documents;
     }
 
-    public record ShopListItem(long id, String name, String ownerName, String ownerEmail,
-            LocalDateTime registrationDate, String status, int staffCount, int orderCount) {}
-    public record ShopStaff(long id, String name, String email, String status) {}
-    public record ShopDetail(long id, String name, String address, String contactNumber,
-            String status, String rejectionReason, LocalDateTime registrationDate,
+    public record ShopListItem(String id, String name, String ownerName, String ownerEmail,
+            java.time.LocalDateTime registrationDate, String status, int staffCount, int orderCount) {}
+    public record ShopStaff(String id, String name, String email, String status) {}
+    public record ShopDetail(String id, String name, String address, String contactNumber,
+            String status, String rejectionReason, java.time.LocalDateTime registrationDate,
             Owner owner, List<ShopStaff> staff, List<ShopDocumentMetadata> documents,
             int staffCount, int orderCount) {}
-    public record Owner(long id, String name, String email) {}
+    public record Owner(String id, String name, String email) {}
     public record PageResult(List<ShopListItem> content, int page, int size, long totalElements) {}
 
     public PageResult list(String status, String search, int page) {
         if (page < 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Page must be zero or greater.");
-        String normalizedStatus = status == null || status.isBlank() ? null : status.trim().toUpperCase();
+        String normalizedStatus = status == null || status.isBlank() ? null : status.trim().toUpperCase(Locale.ROOT);
         if (normalizedStatus != null && !List.of("PENDING", "ACTIVE", "REJECTED", "DEACTIVATED").contains(normalizedStatus)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown shop status filter.");
         }
-        String query = search == null ? "" : search.trim();
-        String pattern = "%" + query + "%";
-        String where = " WHERE (? IS NULL OR s.status = ?) AND (? = '' OR s.name LIKE ? OR owner.full_name LIKE ? OR owner.email LIKE ?)";
-        Long total = jdbc.queryForObject("SELECT COUNT(*) FROM shops s LEFT JOIN users owner ON owner.shop_id=s.id AND owner.role='OWNER'" + where,
-                Long.class, normalizedStatus, normalizedStatus, query, pattern, pattern, pattern);
-        int size = 20;
-        List<ShopListItem> results = jdbc.query("""
-                SELECT s.id, s.name, owner.full_name owner_name, owner.email owner_email,
-                       s.created_at registration_date, s.status,
-                       (SELECT COUNT(*) FROM users staff WHERE staff.shop_id=s.id AND staff.role='STAFF') staff_count,
-                       (SELECT COUNT(*) FROM laundry_orders o WHERE o.shop_id=s.id) order_count
-                FROM shops s LEFT JOIN users owner ON owner.shop_id=s.id AND owner.role='OWNER'
-                """ + where + " ORDER BY CASE WHEN s.status='PENDING' THEN 0 ELSE 1 END, s.created_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                (rs, n) -> new ShopListItem(rs.getLong("id"), rs.getString("name"), rs.getString("owner_name"),
-                        rs.getString("owner_email"), rs.getObject("registration_date", LocalDateTime.class),
-                        rs.getString("status"), rs.getInt("staff_count"), rs.getInt("order_count")),
-                normalizedStatus, normalizedStatus, query, pattern, pattern, pattern, size, (long) page * size);
-        return new PageResult(results, page, size, total == null ? 0 : total);
+        Firestore db = firebase.firestore();
+        Query query = db.collection("shops");
+        if (normalizedStatus != null) query = query.whereEqualTo("status", normalizedStatus);
+        List<QueryDocumentSnapshot> shopDocs = FirestoreSupport.await(query.get()).getDocuments();
+        List<QueryDocumentSnapshot> userDocs = FirestoreSupport.await(db.collection("users").get()).getDocuments();
+        Map<String, List<QueryDocumentSnapshot>> usersByShop = userDocs.stream()
+                .filter(doc -> doc.getString("shopId") != null)
+                .collect(Collectors.groupingBy(doc -> doc.getString("shopId")));
+        String term = search == null ? "" : search.trim().toLowerCase(Locale.ROOT);
+        List<ShopListItem> filtered = new ArrayList<>();
+        for (QueryDocumentSnapshot shop : shopDocs) {
+            List<QueryDocumentSnapshot> attached = usersByShop.getOrDefault(shop.getId(), List.of());
+            QueryDocumentSnapshot ownerDoc = attached.stream().filter(user -> "OWNER".equals(user.getString("role"))).findFirst().orElse(null);
+            String ownerName = ownerDoc == null ? null : ownerDoc.getString("fullName");
+            String ownerEmail = ownerDoc == null ? null : ownerDoc.getString("email");
+            if (!term.isEmpty() && !contains(shop.getString("name"), term) && !contains(ownerName, term) && !contains(ownerEmail, term)) continue;
+            int staffCount = (int) attached.stream().filter(user -> "STAFF".equals(user.getString("role"))).count();
+            filtered.add(new ShopListItem(shop.getId(), shop.getString("name"), ownerName, ownerEmail,
+                    FirestoreSupport.dateTime(shop.get("createdAt")), shop.getString("status"), staffCount, 0));
+        }
+        filtered.sort(Comparator.comparingInt((ShopListItem item) -> "PENDING".equals(item.status()) ? 0 : 1)
+                .thenComparing(ShopListItem::registrationDate, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(ShopListItem::id));
+        long total = filtered.size();
+        long start = (long) page * PAGE_SIZE;
+        List<ShopListItem> content = start >= total ? List.of() : filtered.subList((int) start,
+                (int) Math.min(total, start + PAGE_SIZE));
+        return new PageResult(content, page, PAGE_SIZE, total);
     }
 
-    public ShopDetail detail(long id) {
-        List<ShopDetail> rows = jdbc.query("""
-                SELECT s.id, s.name, s.address, s.contact_number, s.status, s.rejection_reason, s.created_at,
-                       owner.id owner_id, owner.full_name owner_name, owner.email owner_email,
-                       (SELECT COUNT(*) FROM users staff WHERE staff.shop_id=s.id AND staff.role='STAFF') staff_count,
-                       (SELECT COUNT(*) FROM laundry_orders o WHERE o.shop_id=s.id) order_count
-                FROM shops s LEFT JOIN users owner ON owner.shop_id=s.id AND owner.role='OWNER' WHERE s.id=?
-                """, (rs, n) -> new ShopDetail(rs.getLong("id"), rs.getString("name"), rs.getString("address"),
-                rs.getString("contact_number"), rs.getString("status"), rs.getString("rejection_reason"),
-                rs.getObject("created_at", LocalDateTime.class),
-                rs.getObject("owner_id") == null ? null : new Owner(rs.getLong("owner_id"), rs.getString("owner_name"), rs.getString("owner_email")),
-                List.of(), List.of(), rs.getInt("staff_count"), rs.getInt("order_count")), id);
-        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
-        ShopDetail shop = rows.getFirst();
-        List<ShopStaff> staff = jdbc.query("SELECT id, full_name, email, is_active FROM users WHERE shop_id=? AND role='STAFF' ORDER BY full_name, id",
-                (rs, n) -> new ShopStaff(rs.getLong("id"), rs.getString("full_name"), rs.getString("email"), rs.getBoolean("is_active") ? "ACTIVE" : "INACTIVE"), id);
-        return new ShopDetail(shop.id(), shop.name(), shop.address(), shop.contactNumber(), shop.status(),
-                shop.rejectionReason(), shop.registrationDate(), shop.owner(), staff, documents.findMetadataForShop(id),
-                shop.staffCount(), shop.orderCount());
+    public ShopDetail detail(String id) {
+        Firestore db = firebase.firestore();
+        DocumentSnapshot shop = FirestoreSupport.await(db.collection("shops").document(id).get());
+        if (!shop.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
+        List<QueryDocumentSnapshot> attached = FirestoreSupport.await(db.collection("users").whereEqualTo("shopId", id).get()).getDocuments();
+        QueryDocumentSnapshot ownerDoc = attached.stream().filter(user -> "OWNER".equals(user.getString("role"))).findFirst().orElse(null);
+        Owner owner = ownerDoc == null ? null : new Owner(ownerDoc.getId(), ownerDoc.getString("fullName"), ownerDoc.getString("email"));
+        List<ShopStaff> staff = attached.stream().filter(user -> "STAFF".equals(user.getString("role")))
+                .map(user -> new ShopStaff(user.getId(), user.getString("fullName"), user.getString("email"),
+                        Boolean.TRUE.equals(user.getBoolean("active")) ? "ACTIVE" : "INACTIVE"))
+                .sorted(Comparator.comparing(ShopStaff::name, Comparator.nullsLast(String::compareToIgnoreCase))).toList();
+        return new ShopDetail(id, shop.getString("name"), shop.getString("address"), shop.getString("contactNumber"),
+                shop.getString("status"), shop.getString("rejectionReason"), FirestoreSupport.dateTime(shop.get("createdAt")),
+                owner, staff, documents.findMetadataForShop(id), staff.size(), 0);
     }
 
-    @Transactional
-    public void transition(long shopId, String target, String reason, long adminId) {
-        List<String> statuses = jdbc.query("SELECT status FROM shops WHERE id=? FOR UPDATE",
-                (rs, n) -> rs.getString(1), shopId);
-        if (statuses.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
-        String current = statuses.getFirst();
-        String expected = switch (target) {
-            case "ACTIVE" -> "DEACTIVATED";
-            case "DEACTIVATED" -> "ACTIVE";
-            case "REJECTED", "APPROVED" -> "PENDING";
-            default -> throw new IllegalArgumentException("Unsupported transition target");
-        };
-        if (!expected.equals(current)) throw new ResponseStatusException(HttpStatus.CONFLICT,
-                "Cannot " + target.toLowerCase() + " a shop with status " + current + ".");
-        String action = switch (target) {
-            case "ACTIVE" -> "REACTIVATED";
-            case "DEACTIVATED" -> "DEACTIVATED";
-            default -> target;
-        };
-        String storedStatus = "APPROVED".equals(target) ? "ACTIVE" : target;
-        jdbc.update("UPDATE shops SET status=?, rejection_reason=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
-                storedStatus, "REJECTED".equals(target) ? reason : null, adminId, shopId);
-        jdbc.update("INSERT INTO shop_review_history (shop_id, action, reason, acted_by) VALUES (?, ?, ?, ?)",
-                shopId, action, "REJECTED".equals(target) ? reason : null, adminId);
+    public void transition(String shopId, String target, String reason, String adminId) {
+        Firestore db = firebase.firestore();
+        DocumentReference shop = db.collection("shops").document(shopId);
+        DocumentReference history = db.collection("shopReviewHistory").document();
+        FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot snapshot = FirestoreSupport.await(tx.get(shop));
+            if (!snapshot.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
+            String current = snapshot.getString("status");
+            String expected = switch (target) {
+                case "ACTIVE" -> "DEACTIVATED";
+                case "DEACTIVATED" -> "ACTIVE";
+                case "REJECTED", "APPROVED" -> "PENDING";
+                default -> throw new IllegalArgumentException("Unsupported transition target");
+            };
+            if (!Objects.equals(expected, current)) throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot " + target.toLowerCase(Locale.ROOT) + " a shop with status " + current + ".");
+            String status = "APPROVED".equals(target) ? "ACTIVE" : target;
+            String action = "ACTIVE".equals(target) ? "REACTIVATED" : "APPROVED".equals(target) ? "APPROVED" : target;
+            Map<String, Object> update = new HashMap<>();
+            update.put("status", status);
+            update.put("rejectionReason", "REJECTED".equals(target) ? reason : null);
+            update.put("reviewedBy", adminId);
+            update.put("reviewedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.update(shop, update);
+            Map<String, Object> audit = new HashMap<>();
+            audit.put("shopId", shopId);
+            audit.put("action", action);
+            audit.put("reason", "REJECTED".equals(target) ? reason : null);
+            audit.put("actedBy", adminId);
+            audit.put("actedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.create(history, audit);
+            return null;
+        });
         // TODO: Send the owner a status-change email through Brevo when email integration is approved.
+    }
+
+    private static boolean contains(String value, String term) {
+        return value != null && value.toLowerCase(Locale.ROOT).contains(term);
     }
 }

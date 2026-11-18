@@ -10,19 +10,19 @@ class ShopDocumentAccessPolicyTest {
 
     @Test
     void platformAdministratorMayOpenAnyShopDocument() {
-        assertTrue(policy.canOpen("PLATFORM_ADMIN", 900L, 41L));
+        assertTrue(policy.canOpen("PLATFORM_ADMIN", "admin-900", "owner-41"));
     }
 
     @Test
     void onlyTheOwnerWhoUploadedMayOpenAsAnOwner() {
-        assertTrue(policy.canOpen("OWNER", 41L, 41L));
-        assertFalse(policy.canOpen("OWNER", 42L, 41L));
-        assertFalse(policy.canOpen("OWNER", null, 41L));
+        assertTrue(policy.canOpen("OWNER", "owner-41", "owner-41"));
+        assertFalse(policy.canOpen("OWNER", "owner-42", "owner-41"));
+        assertFalse(policy.canOpen("OWNER", null, "owner-41"));
     }
 
     @Test
     void staffAndCustomersCannotOpenShopDocuments() {
-        assertFalse(policy.canOpen("STAFF", 41L, 41L));
-        assertFalse(policy.canOpen("CUSTOMER", 41L, 41L));
+        assertFalse(policy.canOpen("STAFF", "owner-41", "owner-41"));
+        assertFalse(policy.canOpen("CUSTOMER", "owner-41", "owner-41"));
     }
 }

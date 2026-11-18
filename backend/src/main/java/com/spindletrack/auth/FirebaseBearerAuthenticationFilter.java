@@ -25,9 +25,7 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
     private final UserAccountRepository userAccounts;
     private final ObjectMapper objectMapper;
 
-    public FirebaseBearerAuthenticationFilter(
-            FirebaseTokenVerifier tokenVerifier,
-            UserAccountRepository userAccounts,
+    public FirebaseBearerAuthenticationFilter(FirebaseTokenVerifier tokenVerifier, UserAccountRepository userAccounts,
             ObjectMapper objectMapper) {
         this.tokenVerifier = tokenVerifier;
         this.userAccounts = userAccounts;
@@ -36,27 +34,22 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return "/api/health".equals(request.getServletPath())
-                || "OPTIONS".equalsIgnoreCase(request.getMethod());
+        return "/api/health".equals(request.getServletPath()) || "OPTIONS".equalsIgnoreCase(request.getMethod());
     }
 
     @Override
-    protected void doFilterInternal(
-            HttpServletRequest request,
-            HttpServletResponse response,
-            FilterChain filterChain) throws ServletException, IOException {
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             filterChain.doFilter(request, response);
             return;
         }
-
         String rawToken = header.substring(7).trim();
         if (rawToken.isEmpty()) {
             writeError(response, HttpStatus.UNAUTHORIZED, "A Firebase ID token is required.");
             return;
         }
-
         try {
             FirebaseIdentity identity = tokenVerifier.verify(rawToken);
             UserAccount account = userAccounts.findByFirebaseUid(identity.uid()).orElse(null);
@@ -64,19 +57,17 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
                 writeError(response, HttpStatus.FORBIDDEN, "This account is inactive.");
                 return;
             }
-            if (account != null
-                    && !ShopOperationPolicy.mayUseShopOperations(
-                            account.role(), account.shopStatus(), request.getMethod(), request.getServletPath())) {
+            if (account != null && !ShopOperationPolicy.mayUseShopOperations(account.role(), account.shopStatus(),
+                    request.getMethod(), request.getServletPath())) {
                 SecurityContextHolder.clearContext();
                 writeShopStatusError(response, ShopOperationPolicy.blockedMessage(account.shopStatus()));
                 return;
             }
-
             List<SimpleGrantedAuthority> authorities = new ArrayList<>();
             authorities.add(new SimpleGrantedAuthority("ROLE_AUTHENTICATED"));
-            Long userId = null;
+            String userId = null;
             String role = null;
-            Long shopId = null;
+            String shopId = null;
             String shopStatus = null;
             if (account != null) {
                 role = account.role();
@@ -85,11 +76,10 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
                 shopStatus = account.shopStatus();
                 authorities.add(new SimpleGrantedAuthority("ROLE_" + account.role()));
             }
-
-            FirebasePrincipal principal = new FirebasePrincipal(
-                    identity.uid(), identity.email(), identity.displayName(), userId, role, shopId, shopStatus);
-            var authentication = new UsernamePasswordAuthenticationToken(principal, null, authorities);
-            SecurityContextHolder.getContext().setAuthentication(authentication);
+            FirebasePrincipal principal = new FirebasePrincipal(identity.uid(), identity.email(), identity.displayName(),
+                    userId, role, shopId, shopStatus);
+            SecurityContextHolder.getContext().setAuthentication(
+                    new UsernamePasswordAuthenticationToken(principal, null, authorities));
             filterChain.doFilter(request, response);
         } catch (FirebaseAuthenticationException exception) {
             SecurityContextHolder.clearContext();
@@ -100,9 +90,7 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
     private void writeShopStatusError(HttpServletResponse response, String message) throws IOException {
         response.setStatus(HttpStatus.FORBIDDEN.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        objectMapper.writeValue(response.getOutputStream(), Map.of(
-                "code", "SHOP_NOT_ACTIVE",
-                "message", message));
+        objectMapper.writeValue(response.getOutputStream(), Map.of("code", "SHOP_NOT_ACTIVE", "message", message));
     }
 
     private void writeError(HttpServletResponse response, HttpStatus status, String message) throws IOException {

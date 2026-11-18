@@ -11,7 +11,7 @@ class ShopRegistrationEligibilityTest {
     private final ShopRegistrationEligibility eligibility = new ShopRegistrationEligibility();
 
     @Test
-    void unassociatedCustomerWithoutOrdersCanRegister() {
+    void unassociatedCustomerCanRegister() {
         assertDoesNotThrow(() -> eligibility.requireEligible(account("CUSTOMER", null), false));
     }
 
@@ -26,7 +26,7 @@ class ShopRegistrationEligibilityTest {
     void ownerStaffAndPlatformAdminCannotRegisterAnotherShop() {
         for (String role : new String[] {"OWNER", "STAFF", "PLATFORM_ADMIN"}) {
             ResponseStatusException exception = assertThrows(ResponseStatusException.class,
-                    () -> eligibility.requireEligible(account(role, 1L), false));
+                    () -> eligibility.requireEligible(account(role, "shop-1"), false));
             assertEquals("Please use another account.", exception.getReason());
         }
     }
@@ -34,11 +34,11 @@ class ShopRegistrationEligibilityTest {
     @Test
     void customerAlreadyAssociatedWithAShopCannotRegisterAnotherShop() {
         ResponseStatusException exception = assertThrows(ResponseStatusException.class,
-                () -> eligibility.requireEligible(account("CUSTOMER", 1L), false));
+                () -> eligibility.requireEligible(account("CUSTOMER", "shop-1"), false));
         assertEquals("Please use another account.", exception.getReason());
     }
 
-    private static UserAccount account(String role, Long shopId) {
-        return new UserAccount(1L, "firebase-uid", "Test User", "test@example.com", role, true, shopId, null);
+    private static UserAccount account(String role, String shopId) {
+        return new UserAccount("user-1", "firebase-uid", "Test User", "test@example.com", role, true, shopId, null);
     }
 }

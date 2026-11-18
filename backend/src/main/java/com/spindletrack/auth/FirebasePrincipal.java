@@ -4,8 +4,8 @@ public record FirebasePrincipal(
         String uid,
         String email,
         String displayName,
-        Long userId,
+        String userId,
         String role,
-        Long shopId,
+        String shopId,
         String shopStatus) {
 }

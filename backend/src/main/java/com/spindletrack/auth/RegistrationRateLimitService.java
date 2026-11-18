@@ -6,37 +6,35 @@ import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.Map;
 
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.google.cloud.firestore.DocumentReference;
+import com.google.cloud.firestore.DocumentSnapshot;
+import com.google.cloud.firestore.Firestore;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class RegistrationRateLimitService {
-    private final JdbcTemplate jdbcTemplate;
+    private final FirebaseAdminTokenVerifier firebase;
 
-    public RegistrationRateLimitService(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+    public RegistrationRateLimitService(FirebaseAdminTokenVerifier firebase) {
+        this.firebase = firebase;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int recordAttempt(String remoteAddress) {
         String ipHash = hashAddress(remoteAddress);
         LocalDate todayUtc = LocalDate.now(ZoneOffset.UTC);
-        jdbcTemplate.update("""
-                INSERT INTO shop_registration_rate_limits (ip_hash, attempt_date, attempt_count)
-                VALUES (?, ?, 1)
-                ON DUPLICATE KEY UPDATE
-                    attempt_count = attempt_count + 1,
-                    updated_at = CURRENT_TIMESTAMP
-                """, ipHash, todayUtc);
-        Integer count = jdbcTemplate.queryForObject("""
-                SELECT attempt_count
-                FROM shop_registration_rate_limits
-                WHERE ip_hash = ? AND attempt_date = ?
-                """, Integer.class, ipHash, todayUtc);
-        return count == null ? 0 : count;
+        Firestore db = firebase.firestore();
+        DocumentReference ref = db.collection("shopRegistrationRateLimits")
+                .document(ipHash + "_" + todayUtc);
+        return FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(ref));
+            long count = current.exists() && current.getLong("attemptCount") != null
+                    ? current.getLong("attemptCount") + 1 : 1;
+            tx.set(ref, Map.of("ipHash", ipHash, "attemptDate", todayUtc.toString(),
+                    "attemptCount", count, "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return Math.toIntExact(count);
+        });
     }
 
     static String hashAddress(String remoteAddress) {

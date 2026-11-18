@@ -21,7 +21,7 @@ public class AdminShopController {
     public AdminShopController(AdminShopService shops) { this.shops = shops; }
 
     public record RejectRequest(@NotBlank(message = "Rejection reason is required.") @Size(max = 500, message = "Rejection reason must be 500 characters or fewer.") String reason) {}
-    public record ActionResponse(long shopId, String status) {}
+    public record ActionResponse(String shopId, String status) {}
 
     @GetMapping
     public AdminShopService.PageResult list(@RequestParam(required = false) String status,
@@ -29,22 +29,22 @@ public class AdminShopController {
         return shops.list(status, search, page);
     }
     @GetMapping("/{id}")
-    public AdminShopService.ShopDetail detail(@PathVariable long id) { return shops.detail(id); }
+    public AdminShopService.ShopDetail detail(@PathVariable String id) { return shops.detail(id); }
     @PostMapping("/{id}/approve")
-    public ActionResponse approve(@PathVariable long id, @AuthenticationPrincipal FirebasePrincipal principal) {
+    public ActionResponse approve(@PathVariable String id, @AuthenticationPrincipal FirebasePrincipal principal) {
         shops.transition(id, "APPROVED", null, principal.userId()); return new ActionResponse(id, "ACTIVE");
     }
     @PostMapping("/{id}/reject")
-    public ActionResponse reject(@PathVariable long id, @Valid @RequestBody RejectRequest request,
+    public ActionResponse reject(@PathVariable String id, @Valid @RequestBody RejectRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
         shops.transition(id, "REJECTED", request.reason().trim(), principal.userId()); return new ActionResponse(id, "REJECTED");
     }
     @PostMapping("/{id}/deactivate")
-    public ActionResponse deactivate(@PathVariable long id, @AuthenticationPrincipal FirebasePrincipal principal) {
+    public ActionResponse deactivate(@PathVariable String id, @AuthenticationPrincipal FirebasePrincipal principal) {
         shops.transition(id, "DEACTIVATED", null, principal.userId()); return new ActionResponse(id, "DEACTIVATED");
     }
     @PostMapping("/{id}/activate")
-    public ActionResponse activate(@PathVariable long id, @AuthenticationPrincipal FirebasePrincipal principal) {
+    public ActionResponse activate(@PathVariable String id, @AuthenticationPrincipal FirebasePrincipal principal) {
         shops.transition(id, "ACTIVE", null, principal.userId()); return new ActionResponse(id, "ACTIVE");
     }
 }

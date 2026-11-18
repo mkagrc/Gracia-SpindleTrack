@@ -19,27 +19,18 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/shops/documents")
 public class ShopDocumentController {
     private final ShopRegistrationService registrations;
-
-    public ShopDocumentController(ShopRegistrationService registrations) {
-        this.registrations = registrations;
-    }
+    public ShopDocumentController(ShopRegistrationService registrations) { this.registrations = registrations; }
 
     @GetMapping("/{documentId}")
     @PreAuthorize("hasAnyRole('PLATFORM_ADMIN', 'OWNER')")
-    public ResponseEntity<InputStreamResource> open(
-            @PathVariable long documentId,
+    public ResponseEntity<InputStreamResource> open(@PathVariable String documentId,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        ShopDocumentDownload download = registrations.openDocument(
-                documentId, principal.userId(), principal.role());
+        ShopDocumentDownload download = registrations.openDocument(documentId, principal.userId(), principal.role());
         ContentDisposition disposition = ContentDisposition.attachment()
-                .filename(download.originalFilename(), StandardCharsets.UTF_8)
-                .build();
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(download.contentType()))
-                .contentLength(download.sizeBytes())
-                .cacheControl(CacheControl.noStore())
+                .filename(download.originalFilename(), StandardCharsets.UTF_8).build();
+        return ResponseEntity.ok().contentType(MediaType.parseMediaType(download.contentType()))
+                .contentLength(download.sizeBytes()).cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
-                .header("X-Content-Type-Options", "nosniff")
-                .body(new InputStreamResource(download.content()));
+                .header("X-Content-Type-Options", "nosniff").body(new InputStreamResource(download.content()));
     }
 }

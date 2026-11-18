@@ -3,14 +3,14 @@ package com.spindletrack.auth;
 import java.time.LocalDateTime;
 
 public record ShopDocumentRecord(
-        long id,
-        long shopId,
+        String id,
+        String shopId,
         String documentType,
         String originalFilename,
         String storedFilename,
         String contentType,
         long sizeBytes,
-        long uploadedBy,
+        String uploadedBy,
         LocalDateTime uploadedAt) {
 
     public ShopDocumentMetadata metadata() {

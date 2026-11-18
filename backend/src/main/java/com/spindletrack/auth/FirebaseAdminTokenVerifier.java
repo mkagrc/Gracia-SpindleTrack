@@ -6,11 +6,13 @@ import java.nio.file.Path;
 import java.util.Map;
 
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.firestore.Firestore;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
 import com.google.firebase.auth.FirebaseToken;
+import com.google.firebase.cloud.FirestoreClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -19,6 +21,7 @@ import org.springframework.stereotype.Component;
 public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
     private static final String APP_NAME = "spindletrack-auth";
     private final String serviceAccountPath;
+    private volatile FirebaseApp firebaseApp;
     private volatile FirebaseAuth firebaseAuth;
 
     public FirebaseAdminTokenVerifier(
@@ -52,26 +55,34 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         return new FirebaseIdentity(uid, email.trim(), stringClaim(claims, "name"));
     }
 
+    Firestore firestore() {
+        return FirestoreClient.getFirestore(firebaseApp());
+    }
+
     private FirebaseAuth firebaseAuth() {
         FirebaseAuth current = firebaseAuth;
-        if (current != null) {
-            return current;
-        }
+        if (current != null) return current;
         synchronized (this) {
-            if (firebaseAuth != null) {
-                return firebaseAuth;
-            }
+            if (firebaseAuth != null) return firebaseAuth;
+            firebaseAuth = FirebaseAuth.getInstance(firebaseApp());
+            return firebaseAuth;
+        }
+    }
+
+    private FirebaseApp firebaseApp() {
+        FirebaseApp current = firebaseApp;
+        if (current != null) return current;
+        synchronized (this) {
+            if (firebaseApp != null) return firebaseApp;
             if (serviceAccountPath == null || serviceAccountPath.isBlank()) {
                 throw new FirebaseAuthenticationException(
                         HttpStatus.SERVICE_UNAVAILABLE, "Firebase authentication is not configured on the server.");
             }
             try {
-                FirebaseApp app = FirebaseApp.getApps().stream()
+                firebaseApp = FirebaseApp.getApps().stream()
                         .filter(existing -> APP_NAME.equals(existing.getName()))
-                        .findFirst()
-                        .orElseGet(this::initializeFirebaseApp);
-                firebaseAuth = FirebaseAuth.getInstance(app);
-                return firebaseAuth;
+                        .findFirst().orElseGet(this::initializeFirebaseApp);
+                return firebaseApp;
             } catch (FirebaseAuthenticationException exception) {
                 throw exception;
             } catch (RuntimeException exception) {

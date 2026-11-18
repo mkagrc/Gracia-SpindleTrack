@@ -4,7 +4,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 public record ShopRegistrationStatusResponse(
-        long shopId,
+        String shopId,
         String shopName,
         String address,
         String contactNumber,
