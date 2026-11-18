@@ -7,12 +7,13 @@ const firebaseConfig = {
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || '',
 };
 
-export const firebaseConfigReady = Object.values(firebaseConfig).every(Boolean);
+export const firebaseConfigReady = [firebaseConfig.apiKey, firebaseConfig.authDomain, firebaseConfig.projectId, firebaseConfig.appId].every(Boolean);
 export const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(firebaseApp);
-export const databaseUrl = import.meta.env.VITE_FIREBASE_DATABASE_URL || '';
+export const databaseUrl = firebaseConfig.databaseURL;
 export const database = databaseUrl ? getDatabase(firebaseApp, databaseUrl) : null;
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
