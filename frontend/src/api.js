@@ -24,7 +24,16 @@ api.interceptors.request.use(async (config) => {
 });
 
 export function apiErrorMessage(error, fallback = 'The request could not be completed. Please try again.') {
-  return error?.response?.data?.message || error?.message || fallback;
+  const status = error?.response?.status;
+  const data = error?.response?.data;
+  const backendMessage = typeof data?.message === 'string' ? data.message : '';
+  if (data?.code === 'SHOP_NOT_ACTIVE' || error?.code === 'SHOP_NOT_ACTIVE') {
+    return backendMessage || 'This shop is not active yet. Shop operations are currently blocked.';
+  }
+  if (status === 401) return 'Your sign-in session has expired or is invalid. Sign in again to continue.';
+  if (status === 403) return backendMessage || 'You do not have permission to do this, or your shop is not active.';
+  if (status === 409) return backendMessage || 'The shop status changed before this action completed. Refresh and try again.';
+  return backendMessage || error?.message || fallback;
 }
 
 export default api;
