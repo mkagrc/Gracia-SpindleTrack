@@ -10,7 +10,7 @@ import {
 import { onDisconnect, ref, serverTimestamp, set } from 'firebase/database';
 import api, { apiErrorMessage } from './api.js';
 import { auth, database, firebaseConfigReady, googleProvider } from './firebase.js';
-import { startPresenceHeartbeat } from './presenceHeartbeat.js';
+import { createPresenceHeartbeatManager, startPresenceHeartbeat } from './presenceHeartbeat.js';
 
 const AuthContext = createContext(null);
 
@@ -22,6 +22,7 @@ export function AuthProvider({ children }) {
   const inFlight = useRef(new Map());
   const sessionUid = useRef(null);
   const presenceHeartbeat = useRef(null);
+  if (!presenceHeartbeat.current) presenceHeartbeat.current = createPresenceHeartbeatManager(startPresenceHeartbeat);
 
   const syncSession = useCallback((user) => {
     if (!user) return Promise.reject(new Error('Sign in before continuing.'));
@@ -78,7 +79,7 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     if (!firebaseUser || !session || sessionUid.current !== firebaseUser.uid) return undefined;
-    const heartbeat = startPresenceHeartbeat({
+    const options = {
       database,
       user: firebaseUser,
       session,
@@ -86,11 +87,10 @@ export function AuthProvider({ children }) {
       onDisconnect,
       serverTimestamp,
       set,
-    });
-    presenceHeartbeat.current = { uid: firebaseUser.uid, stop: heartbeat.stop };
+    };
+    void presenceHeartbeat.current.switchTo(options);
     return () => {
-      if (presenceHeartbeat.current?.stop === heartbeat.stop) presenceHeartbeat.current = null;
-      void heartbeat.stop();
+      void presenceHeartbeat.current.stop();
     };
   }, [firebaseUser, session]);
 

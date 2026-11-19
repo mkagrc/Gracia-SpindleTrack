@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { startPresenceHeartbeat } from './presenceHeartbeat.js';
+import { createPresenceHeartbeatManager, startPresenceHeartbeat } from './presenceHeartbeat.js';
 
 function createFirebaseMocks({ onlineError } = {}) {
   const events = [];
@@ -85,4 +85,25 @@ test('Realtime Database permission errors are logged without logging a token', a
   assert.match(mocks.errors[0][1].code, /PERMISSION_DENIED/);
   assert.match(mocks.errors[0][1].message, /Permission denied/);
   assert.doesNotMatch(JSON.stringify(mocks.errors), /idToken|Bearer\s/);
+});
+
+test('switching role paths cancels and stops the old heartbeat before starting the new one', async () => {
+  const mocks = createFirebaseMocks();
+  const manager = createPresenceHeartbeatManager((options) => startPresenceHeartbeat(options));
+  const options = (role) => ({ ...mocks, session: { role } });
+
+  await manager.switchTo(options('CUSTOMER'));
+  await manager.switchTo(options('OWNER'));
+  await manager.stop();
+
+  const oldCancel = mocks.events.findIndex((event) => event[0] === 'onDisconnect.cancel' && event[1] === 'presence/customers/firebase-user-1');
+  const oldOffline = mocks.events.findIndex((event) => event[0] === 'set' && event[1] === 'presence/customers/firebase-user-1' && event[2].online === false);
+  const newReference = mocks.events.findIndex((event) => event[0] === 'ref' && event[1] === 'presence/owners/firebase-user-1');
+  const newDisconnect = mocks.events.findIndex((event) => event[0] === 'onDisconnect' && event[1] === 'presence/owners/firebase-user-1');
+  assert.ok(oldCancel >= 0, 'old onDisconnect registration must be cancelled');
+  assert.ok(oldOffline >= 0, 'old presence node must be marked offline');
+  assert.ok(newReference > oldOffline, 'new role heartbeat must start only after the old path is stopped');
+  assert.ok(newDisconnect > newReference);
+  assert.equal(mocks.events.filter((event) => event[0] === 'onDisconnect' && event[1] === 'presence/customers/firebase-user-1').length, 1);
+  assert.equal(mocks.events.filter((event) => event[0] === 'onDisconnect' && event[1] === 'presence/owners/firebase-user-1').length, 1);
 });

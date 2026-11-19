@@ -21,6 +21,9 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
+    private static final System.Logger LOGGER = System.getLogger(FirebaseAdminTokenVerifier.class.getName());
+    private static final Map<String, String> PRESENCE_GROUPS = Map.of(
+            "PLATFORM_ADMIN", "admin", "OWNER", "owners", "STAFF", "staff", "CUSTOMER", "customers");
     private static final String APP_NAME = "spindletrack-auth";
     private final String serviceAccountPath;
     private final String databaseUrl;
@@ -77,6 +80,24 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
             firebaseAuth().setCustomUserClaims(uid, claims);
         } catch (FirebaseAuthException exception) {
             throw new FirebaseAuthenticationException(HttpStatus.SERVICE_UNAVAILABLE, "Firebase authorization claims could not be refreshed.");
+        }
+        removeOtherRolePresenceNodes(uid, role);
+    }
+
+    void removeOtherRolePresenceNodes(String uid, String role) {
+        String currentGroup = PRESENCE_GROUPS.get(role);
+        if (uid == null || uid.isBlank() || currentGroup == null) return;
+        for (String group : PRESENCE_GROUPS.values()) {
+            if (group.equals(currentGroup)) continue;
+            try {
+                realtimeDatabase().getReference("presence").child(group).child(uid).removeValueAsync().get(3, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                LOGGER.log(System.Logger.Level.WARNING, "Could not remove stale presence node from group {0} (interrupted).", group);
+            } catch (Exception exception) {
+                LOGGER.log(System.Logger.Level.WARNING, "Could not remove stale presence node from group {0} ({1}).",
+                        group, exception.getClass().getSimpleName());
+            }
         }
     }
 

@@ -84,6 +84,7 @@ public class ShopRegistrationService {
                 return null;
             });
             committed = true;
+            firebase.setSessionClaims(firebaseUid, "OWNER", shopRef.getId());
             return new ShopRegistrationResponse(shopRef.getId(), name, "PENDING",
                     "Shop registration and verification documents submitted. Waiting for approval.");
         } finally {

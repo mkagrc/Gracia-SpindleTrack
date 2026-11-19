@@ -83,3 +83,41 @@ export function startPresenceHeartbeat({
 
   return { ready, stop };
 }
+
+export function createPresenceHeartbeatManager(start = startPresenceHeartbeat) {
+  let current = null;
+  let queue = Promise.resolve();
+  let generation = 0;
+
+  function switchTo(options) {
+    const requestedGeneration = ++generation;
+    const operation = queue.then(async () => {
+      if (current) {
+        const previous = current;
+        current = null;
+        await previous.stop();
+      }
+      if (requestedGeneration !== generation) return null;
+      const heartbeat = start(options);
+      current = heartbeat;
+      await heartbeat.ready;
+      return heartbeat;
+    });
+    queue = operation.catch(() => {});
+    return operation;
+  }
+
+  function stop() {
+    generation += 1;
+    const operation = queue.then(async () => {
+      if (!current) return;
+      const previous = current;
+      current = null;
+      await previous.stop();
+    });
+    queue = operation.catch(() => {});
+    return operation;
+  }
+
+  return { switchTo, stop };
+}
