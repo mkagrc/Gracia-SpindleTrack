@@ -13,6 +13,7 @@ import { useAuth } from './AuthContext.jsx';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
 import { AcceptInvitationPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
+import { NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
 
 const ROLE_HOME = { PLATFORM_ADMIN: '/admin/shops', OWNER: '/owner', STAFF: '/staff', CUSTOMER: '/customer/orders' };
 const ROLE_LABEL = { PLATFORM_ADMIN: 'Platform Admin', OWNER: 'Owner', STAFF: 'Staff', CUSTOMER: 'Customer' };
@@ -67,7 +68,7 @@ const MENU = {
   OWNER: [
     { label: 'Dashboard', to: '/owner', icon: LayoutDashboard },
     { label: 'Registration status', to: '/shop-registration', icon: FileCheck2 },
-    { label: 'Orders', to: '/owner/orders', icon: ClipboardList, soon: true },
+    { label: 'Orders', to: '/owner/orders', icon: ClipboardList },
     { label: 'Services', to: '/owner/services', icon: Activity },
     { label: 'Staff', to: '/owner/staff', icon: Users },
     { label: 'Unclaimed', to: '/owner/unclaimed', icon: CircleHelp, soon: true },
@@ -76,8 +77,8 @@ const MENU = {
   ],
   STAFF: [
     { label: 'Dashboard', to: '/staff', icon: LayoutDashboard },
-    { label: 'New order', to: '/staff/new-order', icon: Plus, soon: true },
-    { label: 'Orders', to: '/staff/orders', icon: ClipboardList, soon: true },
+    { label: 'New order', to: '/staff/new-order', icon: Plus },
+    { label: 'Orders', to: '/staff/orders', icon: ClipboardList },
     { label: 'Unclaimed', to: '/staff/unclaimed', icon: CircleHelp, soon: true },
   ],
   PLATFORM_ADMIN: [
@@ -173,7 +174,7 @@ function CustomerOrdersPage() {
 }
 function StaffDashboard() {
   const { session } = useAuth();
-  return <><PageHeading eyebrow="Staff workspace" title={`Welcome${session?.fullName ? `, ${session.fullName}` : ''}`} description="Your shop workspace is ready." /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Assigned shop</p><h2 className="mt-1 text-xl font-semibold">{session?.shop?.name || 'Shop name unavailable'}</h2><div className="mt-2 flex items-center gap-2"><StatusPill status={session?.shop?.status || session?.shopStatus} /></div></div></div><p className="mt-6 max-w-2xl text-sm leading-6 text-slate-500">Staff order workflows are marked “Coming soon” until their backend endpoints are available. This screen does not create sample orders.</p></section></>;
+  return <><PageHeading eyebrow="Staff workspace" title={`Welcome${session?.fullName ? `, ${session.fullName}` : ''}`} description="Your shop workspace is ready." /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Assigned shop</p><h2 className="mt-1 text-xl font-semibold">{session?.shop?.name || 'Shop name unavailable'}</h2><div className="mt-2 flex items-center gap-2"><StatusPill status={session?.shop?.status || session?.shopStatus} /></div></div></div><p className="mt-6 max-w-2xl text-sm leading-6 text-slate-500">Create orders for customers and advance each one through the shop’s laundry stages. Service and order data stays within this shop.</p></section></>;
 }
 function OwnerStaffPresenceCard() {
   const { session } = useAuth();
@@ -204,9 +205,9 @@ function OwnerDashboard() {
     PENDING: ['Waiting for approval', 'Your registration has been received. Shop operations become available after platform review.'],
     REJECTED: ['Changes requested', registration.rejectionReason || 'Review the administrator’s note, update your details or documents, and resubmit.'],
     DEACTIVATED: ['Shop deactivated', 'Your shop is deactivated. Shop operations are blocked; contact the platform administrator for assistance.'],
-    ACTIVE: ['Shop is active', 'Your shop profile is ready. Operational features without backend endpoints are marked Coming soon.'],
+    ACTIVE: ['Shop is active', 'Your shop profile is ready. Manage services, staff, and shop orders from the sidebar.'],
   }[status] || ['Shop status', 'Your current shop status is shown below.'];
-  return <><PageHeading eyebrow="Owner workspace" title="Shop dashboard" description={registration.shopName} /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Shop status</p><h2 className="mt-1 text-xl font-semibold">{registration.shopName}</h2></div></div><StatusPill status={status} /></div><div className={`mt-6 rounded-2xl p-5 ${status === 'PENDING' ? 'bg-amber-50' : status === 'REJECTED' || status === 'DEACTIVATED' ? 'bg-rose-50' : 'bg-emerald-50'}`}><h3 className="font-semibold text-ink">{copy[0]}</h3><p className="mt-2 text-sm leading-6 text-slate-600">{copy[1]}</p></div>{status === 'REJECTED' && <div className="mt-5"><Link to="/shop-registration" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700">Edit and resubmit <ArrowRight size={16} /></Link></div>}{status === 'ACTIVE' && <p className="mt-5 text-sm text-slate-500">Shop profile is available in the sidebar. Services and staff are available. Orders, unclaimed items, and reports are marked Coming soon.</p>}</section></>;
+  return <><PageHeading eyebrow="Owner workspace" title="Shop dashboard" description={registration.shopName} /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Shop status</p><h2 className="mt-1 text-xl font-semibold">{registration.shopName}</h2></div></div><StatusPill status={status} /></div><div className={`mt-6 rounded-2xl p-5 ${status === 'PENDING' ? 'bg-amber-50' : status === 'REJECTED' || status === 'DEACTIVATED' ? 'bg-rose-50' : 'bg-emerald-50'}`}><h3 className="font-semibold text-ink">{copy[0]}</h3><p className="mt-2 text-sm leading-6 text-slate-600">{copy[1]}</p></div>{status === 'REJECTED' && <div className="mt-5"><Link to="/shop-registration" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700">Edit and resubmit <ArrowRight size={16} /></Link></div>}{status === 'ACTIVE' && <p className="mt-5 text-sm text-slate-500">Shop profile is available in the sidebar. Services, staff, and orders are available for an active shop.</p>}</section></>;
 }
 function validateFiles(files, currentCount = 0) {
   if (files.length < 1) return 'Choose at least one JPG, PNG, or PDF file.';
@@ -388,14 +389,16 @@ function AppRoutes() {
     <Route path="/shop-status" element={<Navigate to="/owner" replace />} />
     <Route path="/owner/profile" element={<RoleGuard roles={['OWNER']}><ShopProfilePage /></RoleGuard>} />
     <Route path="/shop-registration" element={<RoleGuard roles={['OWNER']}><RegistrationStatusPage /></RoleGuard>} />
-    <Route path="/owner/orders" element={<RoleGuard roles={['OWNER']}><SoonPage title="Orders" /></RoleGuard>} />
+    <Route path="/owner/orders" element={<RoleGuard roles={['OWNER']}><OrdersListPage readOnly /></RoleGuard>} />
+    <Route path="/owner/orders/:orderId" element={<RoleGuard roles={['OWNER']}><OrderDetailPage readOnly /></RoleGuard>} />
     <Route path="/owner/services" element={<RoleGuard roles={['OWNER']}><OwnerServicesPage /></RoleGuard>} />
     <Route path="/owner/staff" element={<RoleGuard roles={['OWNER']}><OwnerStaffPage /></RoleGuard>} />
     <Route path="/owner/unclaimed" element={<RoleGuard roles={['OWNER']}><SoonPage title="Unclaimed items" /></RoleGuard>} />
     <Route path="/owner/reports" element={<RoleGuard roles={['OWNER']}><SoonPage title="Reports" /></RoleGuard>} />
     <Route path="/staff" element={<RoleGuard roles={['STAFF']}><><StaffDashboard /><StaffServicesPanel /></></RoleGuard>} />
-    <Route path="/staff/new-order" element={<RoleGuard roles={['STAFF']}><SoonPage title="New order" /></RoleGuard>} />
-    <Route path="/staff/orders" element={<RoleGuard roles={['STAFF']}><SoonPage title="Orders" /></RoleGuard>} />
+    <Route path="/staff/new-order" element={<RoleGuard roles={['STAFF']}><NewOrderPage /></RoleGuard>} />
+    <Route path="/staff/orders" element={<RoleGuard roles={['STAFF']}><OrdersListPage /></RoleGuard>} />
+    <Route path="/staff/orders/:orderId" element={<RoleGuard roles={['STAFF']}><OrderDetailPage /></RoleGuard>} />
     <Route path="/staff/unclaimed" element={<RoleGuard roles={['STAFF']}><SoonPage title="Unclaimed items" /></RoleGuard>} />
     <Route path="/admin/shops" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopsPage /></RoleGuard>} />
     <Route path="/admin/shops/:id" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopDetailPage /></RoleGuard>} />
