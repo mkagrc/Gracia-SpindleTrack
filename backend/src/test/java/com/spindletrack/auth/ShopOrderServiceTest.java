@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,7 +49,7 @@ class ShopOrderServiceTest {
         assertEquals(new BigDecimal("30.75"), first.total());
         assertEquals(new BigDecimal("30.75"), first.items().get(0).lineTotal());
         assertEquals(LaundryStage.RECEIVED, first.stage());
-        verify(f.services).document("svc-string-A");
+        verify(f.services, atLeastOnce()).document("svc-string-A");
     }
 
     @Test

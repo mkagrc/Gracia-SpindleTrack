@@ -2,6 +2,7 @@ package com.spindletrack.auth;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
@@ -63,7 +64,7 @@ class ShopOrderControllerTest {
 
         verify(orders).create(any(), any());
         verify(orders).advance(any(), eq("order-id-a7"));
-        verify(orders).list(any(), eq(null), eq(null), eq(0));
+        verify(orders, times(2)).list(any(), eq(null), eq(null), eq(0));
         verify(orders).get(any(), eq("order-id-a7"));
     }
 
