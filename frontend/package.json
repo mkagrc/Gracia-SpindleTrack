@@ -7,7 +7,7 @@
     "dev": "vite --configLoader runner",
     "build": "vite build --configLoader runner",
     "preview": "vite preview --configLoader runner",
-    "test": "node --test src/presenceHeartbeat.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "axios": "^1.11.0",
