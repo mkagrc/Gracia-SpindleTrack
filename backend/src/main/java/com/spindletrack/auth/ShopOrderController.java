@@ -49,6 +49,13 @@ public class ShopOrderController {
         return orders.changePrice(principal, orderId, request);
     }
 
+    @PostMapping("/{orderId}/payments/cash")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.OrderSummary recordCashPayment(@PathVariable String orderId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.recordCashPayment(principal, orderId);
+    }
+
     @PostMapping("/{orderId}/advance")
     @PreAuthorize("hasRole('STAFF')")
     public ShopOrderService.OrderSummary advance(@PathVariable String orderId,

@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -37,7 +38,14 @@ class ShopOrderPricingServiceTest {
         assertEquals(new BigDecimal("2.35"), created.kilos());
         assertEquals(new BigDecimal("123.45"), created.totalPrice());
         assertEquals("Wash", created.serviceName());
+        assertEquals("UNPAID", created.paymentStatus());
+        assertEquals(null, created.paymentMethod());
+        assertEquals(null, created.paidAt());
+        assertEquals(null, created.paidByUid());
+        assertEquals(null, created.paidByName());
         verify(f.tx).create(eq(f.order), argThat(values -> values.get("totalPrice").equals(new BigDecimal("123.45"))
+                && "UNPAID".equals(values.get("paymentStatus")) && values.get("paymentMethod") == null
+                && values.get("paidAt") == null && values.get("paidByUid") == null && values.get("paidByName") == null
                 && !values.containsKey("items") && !values.containsKey("total")));
         verify(f.tx).create(eq(f.priceLog), argThat(values -> values.get("previousPrice") == null
                 && values.get("newPrice").equals(new BigDecimal("123.45"))
@@ -56,10 +64,25 @@ class ShopOrderPricingServiceTest {
                 new ShopOrderService.PriceChangeRequest(new BigDecimal("88.20")));
 
         assertEquals(new BigDecimal("88.20"), result.totalPrice());
+        assertEquals("UNPAID", result.paymentStatus());
         verify(f.tx).update(eq(f.order), argThat(values -> new BigDecimal("88.20").equals(values.get("totalPrice"))));
         verify(f.tx).create(eq(f.priceLog), argThat(values -> new BigDecimal("123.45").equals(values.get("previousPrice"))
                 && new BigDecimal("88.20").equals(values.get("newPrice"))
                 && "staff-uid".equals(values.get("changedByUid")) && "Staff Display".equals(values.get("changedByName"))));
+    }
+
+    @Test
+    void legacyOrderWithoutPaymentFieldsIsTreatedAsUnpaid() throws Exception {
+        Fixture f = new Fixture();
+        f.prepareExistingOrder("shop-A");
+        f.transactionHarness();
+
+        ShopOrderService.OrderSummary legacy = new ShopOrderService(f.firebase).changePrice(f.staff(), "order-A",
+                new ShopOrderService.PriceChangeRequest(new BigDecimal("88.20")));
+
+        assertEquals("UNPAID", legacy.paymentStatus());
+        assertEquals(null, legacy.paymentMethod());
+        assertEquals(null, legacy.paidAt());
     }
 
     @Test
@@ -73,6 +96,81 @@ class ShopOrderPricingServiceTest {
         assertEquals(HttpStatus.NOT_FOUND, error.getStatusCode());
         verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
         verify(f.tx, never()).create(any(DocumentReference.class), any());
+    }
+
+    @Test
+    void paidOrderRejectsPriceChangeInsideTheTransaction() throws Exception {
+        Fixture f = new Fixture();
+        f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PAID");
+        f.transactionHarness();
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase).changePrice(f.staff(), "order-A",
+                        new ShopOrderService.PriceChangeRequest(new BigDecimal("88.20"))));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+        verify(f.tx, never()).create(any(DocumentReference.class), any());
+    }
+
+    @Test
+    void claimRequiresPaidButAnEarlierStageCanAdvanceWhileUnpaid() throws Exception {
+        Fixture f = new Fixture();
+        f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("stage")).thenReturn("READY");
+        f.transactionHarness();
+        ShopOrderService service = new ShopOrderService(f.firebase);
+
+        ResponseStatusException unpaid = assertThrows(ResponseStatusException.class,
+                () -> service.advance(f.staff(), "order-A"));
+        assertEquals(HttpStatus.CONFLICT, unpaid.getStatusCode());
+        verify(f.tx, never()).create(eq(f.stageHistory), any());
+
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PAID");
+        assertEquals(com.spindletrack.LaundryStage.CLAIMED, service.advance(f.staff(), "order-A").stage());
+        verify(f.tx).update(eq(f.order), argThat(values -> "CLAIMED".equals(values.get("stage"))));
+    }
+
+    @Test
+    void cashPaymentMarksPaidOnceAndRejectsRepeat() throws Exception {
+        Fixture f = new Fixture();
+        f.prepareExistingOrder("shop-A");
+        f.transactionHarness();
+        ShopOrderService service = new ShopOrderService(f.firebase);
+
+        ShopOrderService.OrderSummary paid = service.recordCashPayment(f.staff(), "order-A");
+        assertEquals("PAID", paid.paymentStatus());
+        assertEquals("CASH", paid.paymentMethod());
+        assertEquals("staff-uid", paid.paidByUid());
+        assertEquals("Staff Display", paid.paidByName());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
+                && "CASH".equals(values.get("paymentMethod"))
+                && values.containsKey("paidAt")
+                && "staff-uid".equals(values.get("paidByUid"))
+                && "Staff Display".equals(values.get("paidByName"))));
+
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PAID");
+        ResponseStatusException duplicate = assertThrows(ResponseStatusException.class,
+                () -> service.recordCashPayment(f.staff(), "order-A"));
+        assertEquals(HttpStatus.CONFLICT, duplicate.getStatusCode());
+        verify(f.tx, times(1)).update(eq(f.order), any(Map.class));
+    }
+
+    @Test
+    void cashPaymentRejectsForeignShopAndOwner() throws Exception {
+        Fixture f = new Fixture();
+        f.prepareExistingOrder("shop-B");
+        f.transactionHarness();
+        ShopOrderService service = new ShopOrderService(f.firebase);
+        ResponseStatusException notFound = assertThrows(ResponseStatusException.class,
+                () -> service.recordCashPayment(f.staff(), "order-A"));
+        assertEquals(HttpStatus.NOT_FOUND, notFound.getStatusCode());
+        verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+
+        ResponseStatusException forbidden = assertThrows(ResponseStatusException.class,
+                () -> service.recordCashPayment(f.owner(), "order-A"));
+        assertEquals(HttpStatus.FORBIDDEN, forbidden.getStatusCode());
     }
 
     @Test

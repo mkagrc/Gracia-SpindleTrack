@@ -48,7 +48,8 @@ public class ShopOrderService {
     public record PriceChangeRequest(@NotNull(message = "Total price is required.") @DecimalMin(value = "0.0", message = "Total price cannot be negative.") @Digits(integer = 6, fraction = 2, message = "Total price must be no more than 999999.99 with at most 2 decimal places.") BigDecimal totalPrice) {}
     public record OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
             String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
-            String notes, LaundryStage stage, Instant createdAt, String createdBy) {}
+            String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
+            String paymentMethod, Instant paidAt, String paidByUid, String paidByName) {}
     public record StageHistory(String id, LaundryStage stage, String changedBy, String changedByName, Instant changedAt) {}
     public record PriceHistory(String id, BigDecimal previousPrice, BigDecimal newPrice, String changedByUid,
             String changedByName, Instant changedAt) {}
@@ -148,6 +149,11 @@ public class ShopOrderService {
             orderValues.put("totalPrice", price);
             orderValues.put("notes", notes);
             orderValues.put("stage", LaundryStage.RECEIVED.name());
+            orderValues.put("paymentStatus", "UNPAID");
+            orderValues.put("paymentMethod", null);
+            orderValues.put("paidAt", null);
+            orderValues.put("paidByUid", null);
+            orderValues.put("paidByName", null);
             orderValues.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             orderValues.put("createdBy", changedBy);
             Map<String, Object> priceValues = priceHistoryValues(null, price, changedByUid, changedByName);
@@ -156,7 +162,7 @@ public class ShopOrderService {
             tx.create(stageHistory, historyValues(shopId, order.getId(), LaundryStage.RECEIVED, changedBy, changedByName));
             tx.create(priceHistory, priceValues);
             return new OrderSummary(order.getId(), shopId, code, customerName, mobile, null, serviceId, serviceName,
-                    kilos, price, notes, LaundryStage.RECEIVED, createdAt, changedBy);
+                    kilos, price, notes, LaundryStage.RECEIVED, createdAt, changedBy, "UNPAID", null, null, null, null);
         });
     }
 
@@ -176,11 +182,40 @@ public class ShopOrderService {
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             requireActiveShop(shopSnapshot);
             requireOwned(current, shopId);
-            // TODO(Step 7b): reject with HTTP 409 when paymentStatus is PAID.
+            if (isPaid(current)) throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Paid orders cannot have their price changed.");
             BigDecimal previousPrice = decimal(current.get("totalPrice"));
             tx.update(order, Map.of("totalPrice", newPrice, "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             tx.create(log, priceHistoryValues(previousPrice, newPrice, changedByUid, changedByName));
             return replacePrice(mapOrder(current), newPrice);
+        });
+    }
+
+    public OrderSummary recordCashPayment(FirebasePrincipal principal, String orderId) {
+        requireRole(principal, "STAFF");
+        String shopId = requireShop(principal.shopId());
+        String id = requireId(orderId);
+        Firestore db = firebase.firestore();
+        DocumentReference shop = db.collection(SHOPS).document(shopId);
+        DocumentReference order = db.collection(ORDERS).document(id);
+        String paidByUid = principal.uid();
+        String paidByName = displayName(principal);
+        Instant paidAt = Instant.now();
+        return FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+            requireActiveShop(shopSnapshot);
+            requireOwned(current, shopId);
+            if (isPaid(current)) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
+            Map<String, Object> payment = new HashMap<>();
+            payment.put("paymentStatus", "PAID");
+            payment.put("paymentMethod", "CASH");
+            payment.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            payment.put("paidByUid", paidByUid);
+            payment.put("paidByName", paidByName);
+            payment.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.update(order, payment);
+            return withPayment(mapOrder(current), "PAID", "CASH", paidAt, paidByUid, paidByName);
         });
     }
 
@@ -202,7 +237,9 @@ public class ShopOrderService {
             LaundryStage stage = parseStage(current.getString("stage"));
             if (stage == LaundryStage.CLAIMED) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already at the final stage, Claimed.");
             LaundryStage next = stage.next();
-            // TODO(Step 7b): advancing to CLAIMED must require the order to be PAID.
+            if (next == LaundryStage.CLAIMED && !isPaid(current)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Order must be paid before it can be claimed");
+            }
             tx.update(order, Map.of("stage", next.name(), "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             tx.create(history, historyValues(shopId, id, next, changedBy, changedByName));
             return replaceStage(mapOrder(current), next);
@@ -236,7 +273,9 @@ public class ShopOrderService {
                 name == null ? "" : name, snapshot.getString("mobile"), snapshot.getString("customerUserId"),
                 snapshot.getString("serviceId"), snapshot.getString("serviceName"), decimal(snapshot.get("kilos")),
                 decimal(snapshot.get("totalPrice")), snapshot.getString("notes"), parseStage(snapshot.getString("stage")),
-                instant(snapshot.get("createdAt")), snapshot.getString("createdBy"));
+                instant(snapshot.get("createdAt")), snapshot.getString("createdBy"), paymentStatus(snapshot),
+                snapshot.getString("paymentMethod"), instant(snapshot.get("paidAt")), snapshot.getString("paidByUid"),
+                snapshot.getString("paidByName"));
     }
 
     private static StageHistory mapHistory(DocumentSnapshot snapshot) {
@@ -249,11 +288,22 @@ public class ShopOrderService {
     }
     private static OrderSummary replaceStage(OrderSummary order, LaundryStage stage) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
-                order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), stage, order.createdAt(), order.createdBy());
+                order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), stage, order.createdAt(), order.createdBy(),
+                order.paymentStatus(), order.paymentMethod(), order.paidAt(), order.paidByUid(), order.paidByName());
     }
     private static OrderSummary replacePrice(OrderSummary order, BigDecimal price) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
-                order.serviceId(), order.serviceName(), order.kilos(), price, order.notes(), order.stage(), order.createdAt(), order.createdBy());
+                order.serviceId(), order.serviceName(), order.kilos(), price, order.notes(), order.stage(), order.createdAt(), order.createdBy(),
+                order.paymentStatus(), order.paymentMethod(), order.paidAt(), order.paidByUid(), order.paidByName());
+    }
+    private static OrderSummary withPayment(OrderSummary order, String status, String method, Instant paidAt, String uid, String name) {
+        return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
+                order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
+                order.createdBy(), status, method, paidAt, uid, name);
+    }
+    private static boolean isPaid(DocumentSnapshot order) { return "PAID".equals(order.getString("paymentStatus")); }
+    private static String paymentStatus(DocumentSnapshot order) {
+        return "PAID".equals(order.getString("paymentStatus")) ? "PAID" : "UNPAID";
     }
     private static BigDecimal validateKilos(BigDecimal value) {
         if (value == null || value.compareTo(BigDecimal.ZERO) <= 0 || value.compareTo(MAX_KILOS) > 0 || value.scale() > 2)

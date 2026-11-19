@@ -7,9 +7,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
@@ -40,7 +42,7 @@ class ShopOrderControllerTest {
     void staffCanCreateAdvanceAndListAndOwnerCanOnlyListAndRead() throws Exception {
         ShopOrderService.OrderSummary summary = new ShopOrderService.OrderSummary("order-id-a7", "shop-string-A", "O-000001",
                 "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
-                "", LaundryStage.RECEIVED, Instant.now(), "staff-user");
+                "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "UNPAID", null, null, null, null);
         when(orders.create(any(), any())).thenReturn(summary);
         when(orders.advance(any(), eq("order-id-a7"))).thenReturn(summary);
         when(orders.list(any(), eq(null), eq(null), eq(0))).thenReturn(new ShopOrderService.OrdersPage(List.of(summary), 0, 20, 1, 1));
@@ -116,6 +118,36 @@ class ShopOrderControllerTest {
                     .andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").isNotEmpty());
         }
     }
+    @Test
+    void cashPaymentEndpointIsStaffOnly() throws Exception {
+        ShopOrderService.OrderSummary paid = new ShopOrderService.OrderSummary("order-id-a7", "shop-string-A", "O-000001",
+                "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
+                "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "PAID", "CASH", Instant.now(), "staff-uid", "Staff");
+        when(orders.recordCashPayment(any(), eq("order-id-a7"))).thenReturn(paid);
+        mvc.perform(post("/api/shops/orders/order-id-a7/payments/cash").with(authentication(auth("STAFF"))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.paymentStatus").value("PAID"))
+                .andExpect(jsonPath("$.paymentMethod").value("CASH"));
+        mvc.perform(post("/api/shops/orders/order-id-a7/payments/cash").with(authentication(auth("OWNER"))))
+                .andExpect(status().isForbidden());
+        for (String role : List.of("PLATFORM_ADMIN", "CUSTOMER")) {
+            mvc.perform(post("/api/shops/orders/order-id-a7/payments/cash").with(authentication(auth(role))))
+                    .andExpect(status().isForbidden());
+        }
+    }
+
+    @Test
+    void patchPricePreflightIsAllowedFromBothConfiguredOrigins() throws Exception {
+        for (String origin : List.of("http://localhost:5173", "http://127.0.0.1:5173")) {
+            mvc.perform(options("/api/shops/orders/order-id-a7/price")
+                    .header("Origin", origin)
+                    .header("Access-Control-Request-Method", "PATCH")
+                    .header("Access-Control-Request-Headers", "authorization,content-type"))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string("Access-Control-Allow-Origin", origin))
+                    .andExpect(header().string("Access-Control-Allow-Methods", org.hamcrest.Matchers.containsString("PATCH")));
+        }
+    }
+
     private static UsernamePasswordAuthenticationToken auth(String role) {
         FirebasePrincipal principal = new FirebasePrincipal("uid", "staff@example.com", "Account", "user-id-77", role, "shop-string-A", "ACTIVE");
         return new UsernamePasswordAuthenticationToken(principal, null,
