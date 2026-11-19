@@ -1,12 +1,11 @@
 package com.spindletrack.auth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -30,48 +29,45 @@ import org.springframework.web.server.ResponseStatusException;
 
 class ShopOrderServiceTest {
     @Test
-    void orderCodesIncrementInTransactionAndTotalUsesActiveServiceSnapshotPrices() throws Exception {
+    void createsOrderWithServerSelectedActiveServiceAndStaffEnteredPrice() throws Exception {
         Fixture f = new Fixture();
         when(f.counterSnapshot.exists()).thenReturn(true);
-        when(f.counterSnapshot.getLong("lastNumber")).thenReturn(7L, 7L, 8L, 8L);
-        runTransaction(f.db, f.transaction);
-        ShopOrderService service = new ShopOrderService(f.firebase);
-        ShopOrderService.CreateOrderRequest request = request("  A Person  ", "+63 (917) 123-4567", 3);
-
-        ShopOrderService.OrderSummary first = service.create(f.staff(), request);
-        ShopOrderService.OrderSummary second = service.create(f.staff(), request);
-
+        when(f.counterSnapshot.getLong("lastNumber")).thenReturn(7L);
+        f.runTransaction();
+        ShopOrderService.OrderSummary first = new ShopOrderService(f.firebase).create(f.staff(), f.request());
         assertEquals("O-000008", first.orderCode());
-        assertEquals("O-000009", second.orderCode());
-        assertNotEquals(first.orderCode(), second.orderCode());
         assertEquals("A Person", first.customerName());
         assertEquals("639171234567", first.mobile());
-        assertEquals(new BigDecimal("30.75"), first.total());
-        assertEquals(new BigDecimal("30.75"), first.items().get(0).lineTotal());
+        assertEquals("svc-string-A", first.serviceId());
+        assertEquals("Wash and fold", first.serviceName());
+        assertEquals(new BigDecimal("2.35"), first.kilos());
+        assertEquals(new BigDecimal("30.75"), first.totalPrice());
         assertEquals(LaundryStage.RECEIVED, first.stage());
-        verify(f.services, atLeastOnce()).document("svc-string-A");
+        verify(f.transaction).create(eq(f.orderRef), argThat(values -> !values.containsKey("items")
+                && !values.containsKey("total") && new BigDecimal("30.75").equals(values.get("totalPrice"))));
+        verify(f.transaction).create(eq(f.priceLogRef), any());
     }
 
     @Test
     void inactiveOrOtherShopServiceCannotBeUsedAndNoOrderIsWritten() throws Exception {
         Fixture f = new Fixture();
         when(f.serviceSnapshot.getString("shopId")).thenReturn("shop-string-B");
-        runTransaction(f.db, f.transaction);
+        f.runTransaction();
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase).create(f.staff(), request("A Person", "639171234567", 1)));
+                () -> new ShopOrderService(f.firebase).create(f.staff(), f.request()));
         assertEquals(HttpStatus.NOT_FOUND, error.getStatusCode());
         verify(f.transaction, never()).create(any(DocumentReference.class), any());
 
         when(f.serviceSnapshot.getString("shopId")).thenReturn("shop-string-A");
         when(f.serviceSnapshot.getBoolean("active")).thenReturn(false);
         ResponseStatusException inactive = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase).create(f.staff(), request("A Person", "639171234567", 1)));
+                () -> new ShopOrderService(f.firebase).create(f.staff(), f.request()));
         assertEquals(HttpStatus.CONFLICT, inactive.getStatusCode());
         verify(f.transaction, never()).create(any(DocumentReference.class), any());
     }
 
     @Test
-    void orderReadIsScopedToCurrentShopAndListQueriesOnlyCurrentShop() throws Exception {
+    void foreignOrderIsNotFoundAndListQueryIsScopedToCallerShop() throws Exception {
         Fixture f = new Fixture();
         when(f.foreignOrderSnapshot.exists()).thenReturn(true);
         when(f.foreignOrderSnapshot.getString("shopId")).thenReturn("shop-string-B");
@@ -91,25 +87,14 @@ class ShopOrderServiceTest {
     }
 
     @Test
-    void staffAdvancesExactlyOneStageAndClaimedCannotAdvanceAgain() throws Exception {
+    void staffAdvancesExactlyOneStageAndWritesDisplayName() throws Exception {
         Fixture f = new Fixture();
-        when(f.orderSnapshot.exists()).thenReturn(true);
-        when(f.orderSnapshot.getId()).thenReturn("order-id-X");
-        when(f.orderSnapshot.getString("shopId")).thenReturn("shop-string-A");
-        when(f.orderSnapshot.getString("stage")).thenReturn("RECEIVED");
-        when(f.orderSnapshot.get("items")).thenReturn(List.of());
-        when(f.orderSnapshot.get("total")).thenReturn(0.0);
-        when(f.orderSnapshot.getString("customerName")).thenReturn("A Person");
-        when(f.orderSnapshot.getString("mobile")).thenReturn("639171234567");
-        when(f.orderSnapshot.getString("orderCode")).thenReturn("O-000001");
-        when(f.orderSnapshot.getString("notes")).thenReturn("");
-        when(f.orders.document("order-id-X")).thenReturn(f.orderRef);
-        runTransaction(f.db, f.transaction);
-
+        f.stubOwnedOrder("order-id-X", "shop-string-A", "RECEIVED");
+        f.runTransaction();
         ShopOrderService.OrderSummary moved = new ShopOrderService(f.firebase).advance(f.staff(), "order-id-X");
         assertEquals(LaundryStage.WASHING, moved.stage());
-        verify(f.transaction).update(eq(f.orderRef), org.mockito.ArgumentMatchers.<Map<String, Object>>argThat(values -> "WASHING".equals(values.get("stage"))));
-
+        verify(f.transaction).update(eq(f.orderRef), argThat(values -> "WASHING".equals(values.get("stage"))));
+        verify(f.transaction).create(eq(f.historyRef), argThat(values -> "Staff".equals(values.get("changedByName"))));
         when(f.orderSnapshot.getString("stage")).thenReturn("CLAIMED");
         ResponseStatusException finalStage = assertThrows(ResponseStatusException.class,
                 () -> new ShopOrderService(f.firebase).advance(f.staff(), "order-id-X"));
@@ -117,30 +102,20 @@ class ShopOrderServiceTest {
     }
 
     @Test
-    void inactiveShopBlocksCreateAndOwnerCannotUseWriteServiceMethods() throws Exception {
+    void inactiveShopBlocksCreateAndOwnerCannotUseWriteMethods() throws Exception {
         Fixture f = new Fixture();
         when(f.shopSnapshot.getString("status")).thenReturn("DEACTIVATED");
-        runTransaction(f.db, f.transaction);
+        f.runTransaction();
         ResponseStatusException inactive = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase).create(f.staff(), request("A Person", "639171234567", 1)));
+                () -> new ShopOrderService(f.firebase).create(f.staff(), f.request()));
         assertEquals(HttpStatus.FORBIDDEN, inactive.getStatusCode());
-        ResponseStatusException ownerWrite = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase).create(f.owner(), request("A Person", "639171234567", 1)));
-        assertEquals(HttpStatus.FORBIDDEN, ownerWrite.getStatusCode());
-    }
-
-    private static ShopOrderService.CreateOrderRequest request(String name, String mobile, int quantity) {
-        return new ShopOrderService.CreateOrderRequest(name, mobile,
-                List.of(new ShopOrderService.ItemRequest("svc-string-A", quantity)), "");
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void runTransaction(Firestore db, Transaction transaction) throws Exception {
-        when(db.runTransaction(any(Transaction.Function.class))).thenAnswer(invocation -> {
-            Transaction.Function<Object> work = invocation.getArgument(0);
-            try { return ApiFutures.immediateFuture(work.updateCallback(transaction)); }
-            catch (Exception exception) { return ApiFutures.immediateFailedFuture(exception); }
-        });
+        ShopOrderService service = new ShopOrderService(f.firebase);
+        assertEquals(HttpStatus.FORBIDDEN, assertThrows(ResponseStatusException.class,
+                () -> service.create(f.owner(), f.request())).getStatusCode());
+        assertEquals(HttpStatus.FORBIDDEN, assertThrows(ResponseStatusException.class,
+                () -> service.changePrice(f.owner(), "order-id-X", new ShopOrderService.PriceChangeRequest(new BigDecimal("10.00")))).getStatusCode());
+        assertEquals(HttpStatus.FORBIDDEN, assertThrows(ResponseStatusException.class,
+                () -> service.advance(f.owner(), "order-id-X")).getStatusCode());
     }
 
     private static final class Fixture {
@@ -155,10 +130,10 @@ class ShopOrderServiceTest {
         final DocumentReference serviceRef = mock(DocumentReference.class);
         final DocumentReference counterRef = mock(DocumentReference.class);
         final DocumentReference orderRef = mock(DocumentReference.class);
-        final DocumentReference secondOrderRef = mock(DocumentReference.class);
         final DocumentReference foreignOrder = mock(DocumentReference.class);
         final DocumentReference historyRef = mock(DocumentReference.class);
-        final DocumentReference secondHistoryRef = mock(DocumentReference.class);
+        final DocumentReference priceLogRef = mock(DocumentReference.class);
+        final CollectionReference priceLogCollection = mock(CollectionReference.class);
         final DocumentSnapshot shopSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot serviceSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot counterSnapshot = mock(DocumentSnapshot.class);
@@ -176,12 +151,13 @@ class ShopOrderServiceTest {
             when(shops.document("shop-string-A")).thenReturn(shopRef);
             when(services.document("svc-string-A")).thenReturn(serviceRef);
             when(counters.document("shop-string-A")).thenReturn(counterRef);
-            when(orders.document()).thenReturn(orderRef, secondOrderRef);
+            when(orders.document()).thenReturn(orderRef);
             when(orders.document("order-id-X")).thenReturn(orderRef);
             when(orders.document("foreign-order-id")).thenReturn(foreignOrder);
             when(orderRef.getId()).thenReturn("order-id-A");
-            when(secondOrderRef.getId()).thenReturn("order-id-B");
-            when(history.document()).thenReturn(historyRef, secondHistoryRef);
+            when(history.document()).thenReturn(historyRef);
+            when(orderRef.collection("priceLog")).thenReturn(priceLogCollection);
+            when(priceLogCollection.document()).thenReturn(priceLogRef);
             when(shopRef.get()).thenReturn(ApiFutures.immediateFuture(shopSnapshot));
             when(shopSnapshot.exists()).thenReturn(true);
             when(shopSnapshot.getString("status")).thenReturn("ACTIVE");
@@ -189,9 +165,31 @@ class ShopOrderServiceTest {
             when(serviceSnapshot.getId()).thenReturn("svc-string-A");
             when(serviceSnapshot.getString("shopId")).thenReturn("shop-string-A");
             when(serviceSnapshot.getBoolean("active")).thenReturn(true);
-            when(serviceSnapshot.getDouble("pricePerUnit")).thenReturn(10.25);
             when(serviceSnapshot.getString("name")).thenReturn("Wash and fold");
             when(serviceSnapshot.getString("unit")).thenReturn("kg");
+        }
+
+        ShopOrderService.CreateOrderRequest request() {
+            return new ShopOrderService.CreateOrderRequest("  A Person  ", "+63 (917) 123-4567", "svc-string-A",
+                    new BigDecimal("2.35"), new BigDecimal("30.75"), "");
+        }
+        void stubOwnedOrder(String id, String shopId, String stage) throws Exception {
+            when(orderSnapshot.exists()).thenReturn(true);
+            when(orderSnapshot.getId()).thenReturn(id);
+            when(orderSnapshot.getString("shopId")).thenReturn(shopId);
+            when(orderSnapshot.getString("stage")).thenReturn(stage);
+            when(orderSnapshot.getString("serviceId")).thenReturn("svc-string-A");
+            when(orderSnapshot.getString("serviceName")).thenReturn("Wash and fold");
+            when(orderSnapshot.getString("customerName")).thenReturn("A Person");
+            when(orderSnapshot.getString("mobile")).thenReturn("639171234567");
+            when(orderSnapshot.getString("orderCode")).thenReturn("O-000001");
+            when(orderSnapshot.getString("notes")).thenReturn("");
+            when(orderSnapshot.getString("createdBy")).thenReturn("staff-user-id");
+            when(orderSnapshot.get("kilos")).thenReturn(new BigDecimal("2.35"));
+            when(orderSnapshot.get("totalPrice")).thenReturn(new BigDecimal("30.75"));
+        }
+        @SuppressWarnings("unchecked")
+        void runTransaction() throws Exception {
             when(transaction.get(any(DocumentReference.class))).thenAnswer(invocation -> {
                 DocumentReference ref = invocation.getArgument(0);
                 if (ref == shopRef) return ApiFutures.immediateFuture(shopSnapshot);
@@ -200,8 +198,12 @@ class ShopOrderServiceTest {
                 if (ref == orderRef) return ApiFutures.immediateFuture(orderSnapshot);
                 return ApiFutures.immediateFuture(mock(DocumentSnapshot.class));
             });
+            when(db.runTransaction(any(Transaction.Function.class))).thenAnswer(invocation -> {
+                Transaction.Function<Object> work = invocation.getArgument(0);
+                try { return ApiFutures.immediateFuture(work.updateCallback(transaction)); }
+                catch (Exception exception) { return ApiFutures.immediateFailedFuture(exception); }
+            });
         }
-
         FirebasePrincipal staff() { return new FirebasePrincipal("staff-uid", "staff@example.com", "Staff", "staff-user-id", "STAFF", "shop-string-A", "ACTIVE"); }
         FirebasePrincipal owner() { return new FirebasePrincipal("owner-uid", "owner@example.com", "Owner", "owner-user-id", "OWNER", "shop-string-A", "ACTIVE"); }
     }

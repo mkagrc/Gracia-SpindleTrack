@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -38,6 +39,14 @@ public class ShopOrderController {
     public ShopOrderService.OrderSummary create(@Valid @RequestBody ShopOrderService.CreateOrderRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
         return orders.create(principal, request);
+    }
+
+    @PatchMapping("/{orderId}/price")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.OrderSummary changePrice(@PathVariable String orderId,
+            @Valid @RequestBody ShopOrderService.PriceChangeRequest request,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.changePrice(principal, orderId, request);
     }
 
     @PostMapping("/{orderId}/advance")

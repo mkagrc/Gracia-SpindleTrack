@@ -7,7 +7,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
@@ -37,17 +39,22 @@ class ShopOrderControllerTest {
     @Test
     void staffCanCreateAdvanceAndListAndOwnerCanOnlyListAndRead() throws Exception {
         ShopOrderService.OrderSummary summary = new ShopOrderService.OrderSummary("order-id-a7", "shop-string-A", "O-000001",
-                "A Person", "639171234567", null, List.of(), BigDecimal.ZERO, "", LaundryStage.RECEIVED, Instant.now(), "staff-user");
+                "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
+                "", LaundryStage.RECEIVED, Instant.now(), "staff-user");
         when(orders.create(any(), any())).thenReturn(summary);
         when(orders.advance(any(), eq("order-id-a7"))).thenReturn(summary);
         when(orders.list(any(), eq(null), eq(null), eq(0))).thenReturn(new ShopOrderService.OrdersPage(List.of(summary), 0, 20, 1, 1));
-        when(orders.get(any(), eq("order-id-a7"))).thenReturn(new ShopOrderService.OrderDetail(summary, List.of()));
+        when(orders.get(any(), eq("order-id-a7"))).thenReturn(new ShopOrderService.OrderDetail(summary, List.of(), List.of()));
+        when(orders.changePrice(any(), eq("order-id-a7"), any())).thenReturn(summary);
 
         mvc.perform(post("/api/shops/orders").with(authentication(auth("STAFF")))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"customerName\":\"A Person\",\"mobile\":\"+63 917 123 4567\",\"items\":[{\"serviceId\":\"svc-string-1\",\"quantity\":2}],\"notes\":\"\"}"))
+                .content("{\"customerName\":\"A Person\",\"mobile\":\"+63 917 123 4567\",\"serviceId\":\"svc-string-1\",\"kilos\":2,\"totalPrice\":30.00,\"notes\":\"\"}"))
                 .andExpect(status().isOk());
         mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("STAFF"))))
+                .andExpect(status().isOk());
+        mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth("STAFF")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"totalPrice\":35.00}"))
                 .andExpect(status().isOk());
         mvc.perform(get("/api/shops/orders").with(authentication(auth("STAFF"))))
                 .andExpect(status().isOk());
@@ -57,7 +64,10 @@ class ShopOrderControllerTest {
                 .andExpect(status().isOk());
         mvc.perform(post("/api/shops/orders").with(authentication(auth("OWNER")))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"items\":[{\"serviceId\":\"svc-string-1\",\"quantity\":1}]}"))
+                .content("{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":1,\"totalPrice\":10}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth("OWNER")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"totalPrice\":35.00}"))
                 .andExpect(status().isForbidden());
         mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("OWNER"))))
                 .andExpect(status().isForbidden());
@@ -66,32 +76,46 @@ class ShopOrderControllerTest {
         verify(orders).advance(any(), eq("order-id-a7"));
         verify(orders, times(2)).list(any(), eq(null), eq(null), eq(0));
         verify(orders).get(any(), eq("order-id-a7"));
+        verify(orders).changePrice(any(), eq("order-id-a7"), any());
     }
 
     @Test
     void adminCustomerAndRemovedStaffCannotAccessShopOrders() throws Exception {
         for (String role : List.of("PLATFORM_ADMIN", "CUSTOMER")) {
-            mvc.perform(get("/api/shops/orders").with(authentication(auth(role))))
+            mvc.perform(get("/api/shops/orders").with(authentication(auth(role)))).andExpect(status().isForbidden());
+            mvc.perform(get("/api/shops/orders/order-id-a7").with(authentication(auth(role)))).andExpect(status().isForbidden());
+            mvc.perform(post("/api/shops/orders").with(authentication(auth(role))).contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":1,\"totalPrice\":10}"))
                     .andExpect(status().isForbidden());
-            mvc.perform(get("/api/shops/orders/order-id-a7").with(authentication(auth(role))))
-                    .andExpect(status().isForbidden());
-            mvc.perform(post("/api/shops/orders").with(authentication(auth(role)))
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"items\":[{\"serviceId\":\"svc-id\",\"quantity\":1}]}"))
-                    .andExpect(status().isForbidden());
-            mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth(role))))
-                    .andExpect(status().isForbidden());
+            mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth(role))).contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"totalPrice\":35.00}")).andExpect(status().isForbidden());
+            mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth(role)))).andExpect(status().isForbidden());
         }
     }
 
     @Test
-    void staffCreateRequiresAtLeastOneItemAndPositiveQuantity() throws Exception {
-        mvc.perform(post("/api/shops/orders").with(authentication(auth("STAFF")))
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"items\":[{\"serviceId\":\"svc-id\",\"quantity\":0}]}"))
-                .andExpect(status().isBadRequest());
+    void createRejectsInvalidKilosPricesAndBlankServiceAtRequestValidation() throws Exception {
+        for (String body : List.of(
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":0,\"totalPrice\":30}",
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":-1,\"totalPrice\":30}",
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":1.001,\"totalPrice\":30}",
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":1,\"totalPrice\":-1}",
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\"svc-id\",\"kilos\":1,\"totalPrice\":30.001}",
+                "{\"customerName\":\"A Person\",\"mobile\":\"639171234567\",\"serviceId\":\" \",\"kilos\":1,\"totalPrice\":30}")) {
+            mvc.perform(post("/api/shops/orders").with(authentication(auth("STAFF")))
+                    .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").isNotEmpty());
+        }
     }
 
+    @Test
+    void pricePatchRejectsNegativeOrOverPrecisionPriceAtRequestValidation() throws Exception {
+        for (String body : List.of("{\"totalPrice\":-0.01}", "{\"totalPrice\":30.001}")) {
+            mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth("STAFF")))
+                    .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").isNotEmpty());
+        }
+    }
     private static UsernamePasswordAuthenticationToken auth(String role) {
         FirebasePrincipal principal = new FirebasePrincipal("uid", "staff@example.com", "Account", "user-id-77", role, "shop-string-A", "ACTIVE");
         return new UsernamePasswordAuthenticationToken(principal, null,
