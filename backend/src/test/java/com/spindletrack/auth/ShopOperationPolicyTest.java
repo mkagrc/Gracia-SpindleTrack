@@ -35,14 +35,16 @@ class ShopOperationPolicyTest {
 
     @Test
     void inactiveOwnersCanSeeStatusEditRejectedRegistrationsAndOpenTheirDocuments() {
-        assertTrue(ShopOperationPolicy.mayUseShopOperations(
-                "OWNER", "REJECTED", "GET", "/api/shops/mine/registration"));
-        assertTrue(ShopOperationPolicy.mayUseShopOperations(
-                "OWNER", "REJECTED", "PUT", "/api/shops/mine/registration"));
-        assertTrue(ShopOperationPolicy.mayUseShopOperations(
-                "OWNER", "REJECTED", "DELETE", "/api/shops/mine/registration/documents/12"));
-        assertTrue(ShopOperationPolicy.mayUseShopOperations(
-                "OWNER", "PENDING", "GET", "/api/shops/documents/12"));
+        for (String status : INACTIVE_STATUSES) {
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "GET", "/api/shops/mine/registration"));
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "PUT", "/api/shops/mine/registration"));
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "DELETE", "/api/shops/mine/registration/documents/doc-a7f9c2"));
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "GET", "/api/shops/documents/doc-a7f9c2"));
+        }
     }
 
     @Test

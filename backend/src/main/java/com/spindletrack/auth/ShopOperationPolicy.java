@@ -32,10 +32,10 @@ public final class ShopOperationPolicy {
             return true;
         }
         if ("DELETE".equals(method) && path != null
-                && path.matches("/api/shops/mine/registration/documents/[0-9]+")) {
+                && path.matches("/api/shops/mine/registration/documents/[^/]+")) {
             return true;
         }
         return "GET".equals(method) && path != null
-                && path.matches("/api/shops/documents/[0-9]+");
+                && path.matches("/api/shops/documents/[^/]+");
     }
 }

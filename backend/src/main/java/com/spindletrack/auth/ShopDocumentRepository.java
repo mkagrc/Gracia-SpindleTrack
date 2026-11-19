@@ -88,6 +88,10 @@ public class ShopDocumentRepository {
             if (!shopId.equals(docSnapshot.getString("shopId")) || !uploadedBy.equals(docSnapshot.getString("uploadedBy"))
                     || !"REJECTED".equals(shopSnapshot.getString("status"))) return false;
             long count = shopSnapshot.getLong("documentCount") == null ? 0 : shopSnapshot.getLong("documentCount");
+            if (count <= 1) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "A registration needs at least one document. Upload a new file first, then remove this one.");
+            }
             tx.delete(document);
             tx.update(shop, "documentCount", Math.max(0, count - 1), "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             return true;
