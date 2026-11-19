@@ -41,6 +41,8 @@ public class StaffManagementService {
     public record InviteRequest(@NotBlank(message = "An email address is required.") @Email(message = "Enter a valid email address.") String email) {}
     public record AcceptRequest(@NotBlank(message = "Invitation token is required.") String token) {}
     public record InvitationSummary(String id, String email, String status, Instant expiresAt, Instant createdAt) {}
+    public record InboxInvitation(String id, String shopName, Instant invitedAt, Instant expiresAt) {}
+    public record InvitationActionResult(String invitationId, String status) {}
     public record InvitationLink(InvitationSummary invitation, String inviteLink) {}
     public record StaffMember(String id, String firebaseUid, String name, String email, boolean active, boolean online, Long lastSeen) {}
     public record AcceptResult(String role, String shopId, String shopName, String shopStatus) {}
@@ -86,6 +88,29 @@ public class StaffManagementService {
         invitations.sort(Comparator.comparing(InvitationSummary::createdAt, Comparator.nullsLast(Comparator.reverseOrder()))
                 .thenComparing(InvitationSummary::id));
         return invitations;
+    }
+
+    public List<InboxInvitation> invitationsForUser(FirebasePrincipal principal) {
+        if (principal == null || !principal.emailVerified() || principal.email() == null || principal.email().isBlank()) return List.of();
+        String normalizedEmail = normalizeEmail(principal.email());
+        Firestore db = firebase.firestore();
+        QuerySnapshot results = FirestoreSupport.await(db.collection(INVITATIONS).whereEqualTo("normalizedEmail", normalizedEmail).get());
+        Instant now = Instant.now();
+        List<InboxInvitation> pending = new ArrayList<>();
+        for (DocumentSnapshot invitation : results.getDocuments()) {
+            if (!"PENDING".equals(invitation.getString("status"))) continue;
+            Instant expiresAt = instant(invitation.get("expiresAt"));
+            if (StaffInvitationToken.expired(expiresAt, now)) continue;
+            String shopId = invitation.getString("shopId");
+            if (shopId == null || shopId.isBlank()) continue;
+            DocumentSnapshot shop = FirestoreSupport.await(db.collection(SHOPS).document(shopId).get());
+            if (!shop.exists()) continue;
+            pending.add(new InboxInvitation(invitation.getId(), shop.getString("name"),
+                    instant(invitation.get("createdAt")), expiresAt));
+        }
+        pending.sort(Comparator.comparing(InboxInvitation::invitedAt, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(InboxInvitation::id));
+        return List.copyOf(pending);
     }
 
     public InvitationLink resend(String shopId, String invitationId) {
@@ -136,9 +161,7 @@ public class StaffManagementService {
     }
 
     public AcceptResult accept(String token, FirebasePrincipal principal) {
-        if (principal == null || principal.userId() == null || principal.uid() == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Sign in with a verified account before accepting an invitation.");
-        }
+        requireVerifiedUser(principal);
         if (token == null || token.isBlank() || token.length() > 256) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invitation token is missing or invalid.");
         }
@@ -148,53 +171,104 @@ public class StaffManagementService {
         AcceptOutcome outcome = FirestoreSupport.transact(db, tx -> {
             QuerySnapshot tokenMatches = FirestoreSupport.await(tx.get(db.collection(INVITATIONS).whereEqualTo("tokenHash", tokenHash)));
             if (tokenMatches.isEmpty()) return new AcceptOutcome(null, HttpStatus.NOT_FOUND, "Invitation link is invalid or no longer current.");
-            DocumentSnapshot invitationSnapshot = tokenMatches.getDocuments().get(0);
-            DocumentReference invitation = invitationSnapshot.getReference();
-            String status = invitationSnapshot.getString("status");
-            if (!"PENDING".equals(status)) {
-                String reason = "ACCEPTED".equals(status) ? "This invitation has already been used."
-                        : "This invitation is no longer available (" + Objects.toString(status, "unknown").toLowerCase(Locale.ROOT) + ").";
-                return new AcceptOutcome(null, HttpStatus.CONFLICT, reason);
-            }
-            Instant now = Instant.now();
-            Instant expiresAt = instant(invitationSnapshot.get("expiresAt"));
-            if (StaffInvitationToken.expired(expiresAt, now)) {
-                tx.update(invitation, Map.of("status", "EXPIRED", "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-                return new AcceptOutcome(null, HttpStatus.GONE, "This invitation has expired. Ask the shop owner to resend it.");
-            }
-            if (!normalizeEmail(invitationSnapshot.getString("normalizedEmail")).equals(normalizedEmail)) {
-                return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "This invitation was sent to a different email address. Sign in with the invited verified email.");
-            }
-            String shopId = invitationSnapshot.getString("shopId");
-            if (shopId == null || shopId.isBlank()) return new AcceptOutcome(null, HttpStatus.CONFLICT, "The invitation is not linked to a shop.");
-            DocumentReference shop = db.collection(SHOPS).document(shopId);
-            DocumentReference user = db.collection(USERS).document(principal.userId());
-            DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
-            DocumentSnapshot userSnapshot = FirestoreSupport.await(tx.get(user));
-            if (!shopSnapshot.exists() || !"ACTIVE".equals(shopSnapshot.getString("status"))) {
-                return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "Shop operations are blocked because the invited shop is not ACTIVE.");
-            }
-            if (!userSnapshot.exists() || !Boolean.TRUE.equals(userSnapshot.getBoolean("active"))) {
-                return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "This account is inactive or unavailable.");
-            }
-            if (!normalizeEmail(userSnapshot.getString("normalizedEmail")).equals(normalizedEmail)) {
-                return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "The signed-in account email does not match its verified Firebase email.");
-            }
-            String role = userSnapshot.getString("role");
-            String currentShop = userSnapshot.getString("shopId");
-            if (!"CUSTOMER".equals(role) || (currentShop != null && !currentShop.isBlank())) {
-                return new AcceptOutcome(null, HttpStatus.CONFLICT, "This account cannot join another shop. Only an unassigned customer can accept a staff invitation.");
-            }
-            tx.update(user, Map.of("role", "STAFF", "shopId", shopId,
-                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-            tx.update(invitation, Map.of("status", "ACCEPTED", "acceptedBy", principal.uid(),
-                    "acceptedAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
-                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-            return new AcceptOutcome(new AcceptResult("STAFF", shopId, shopSnapshot.getString("name"), "ACTIVE"), null, null);
+            return acceptInTransaction(db, tx, tokenMatches.getDocuments().get(0), principal, normalizedEmail, false);
         });
         if (outcome.error() != null) throw new ResponseStatusException(outcome.status(), outcome.error());
         firebase.setSessionClaims(principal.uid(), "STAFF", outcome.value().shopId());
         return outcome.value();
+    }
+
+    public AcceptResult acceptById(String invitationId, FirebasePrincipal principal) {
+        requireVerifiedUser(principal);
+        Firestore db = firebase.firestore();
+        DocumentReference invitation = db.collection(INVITATIONS).document(requireId(invitationId));
+        String normalizedEmail = normalizeEmail(principal.email());
+        AcceptOutcome outcome = FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot snapshot = FirestoreSupport.await(tx.get(invitation));
+            if (!snapshot.exists() || !normalizedEmail.equals(normalizeEmail(snapshot.getString("normalizedEmail")))) {
+                return new AcceptOutcome(null, HttpStatus.NOT_FOUND, "Invitation was not found.");
+            }
+            return acceptInTransaction(db, tx, snapshot, principal, normalizedEmail, true);
+        });
+        if (outcome.error() != null) throw new ResponseStatusException(outcome.status(), outcome.error());
+        firebase.setSessionClaims(principal.uid(), "STAFF", outcome.value().shopId());
+        return outcome.value();
+    }
+
+    public InvitationActionResult decline(String invitationId, FirebasePrincipal principal) {
+        requireVerifiedUser(principal);
+        String normalizedEmail = normalizeEmail(principal.email());
+        Firestore db = firebase.firestore();
+        DocumentReference invitation = db.collection(INVITATIONS).document(requireId(invitationId));
+        return FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot snapshot = FirestoreSupport.await(tx.get(invitation));
+            if (!snapshot.exists() || !normalizedEmail.equals(normalizeEmail(snapshot.getString("normalizedEmail")))) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Invitation was not found.");
+            }
+            if (!"PENDING".equals(snapshot.getString("status"))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Only a pending invitation can be declined.");
+            }
+            if (StaffInvitationToken.expired(instant(snapshot.get("expiresAt")), Instant.now())) {
+                throw new ResponseStatusException(HttpStatus.GONE, "This invitation has expired.");
+            }
+            tx.update(invitation, Map.of("status", "DECLINED", "declinedAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return new InvitationActionResult(invitationId, "DECLINED");
+        });
+    }
+
+    private AcceptOutcome acceptInTransaction(Firestore db, com.google.cloud.firestore.Transaction tx,
+            DocumentSnapshot invitationSnapshot, FirebasePrincipal principal, String normalizedEmail, boolean hideEmailMismatch) {
+        DocumentReference invitation = invitationSnapshot.getReference();
+        String status = invitationSnapshot.getString("status");
+        if (!"PENDING".equals(status)) {
+            String reason = "ACCEPTED".equals(status) ? "This invitation has already been used."
+                    : "This invitation is no longer available (" + Objects.toString(status, "unknown").toLowerCase(Locale.ROOT) + ").";
+            return new AcceptOutcome(null, HttpStatus.CONFLICT, reason);
+        }
+        Instant now = Instant.now();
+        Instant expiresAt = instant(invitationSnapshot.get("expiresAt"));
+        if (StaffInvitationToken.expired(expiresAt, now)) {
+            tx.update(invitation, Map.of("status", "EXPIRED", "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return new AcceptOutcome(null, HttpStatus.GONE, "This invitation has expired. Ask the shop owner to resend it.");
+        }
+        if (!normalizeEmail(invitationSnapshot.getString("normalizedEmail")).equals(normalizedEmail)) {
+            return new AcceptOutcome(null, hideEmailMismatch ? HttpStatus.NOT_FOUND : HttpStatus.FORBIDDEN,
+                    hideEmailMismatch ? "Invitation was not found." : "This invitation was sent to a different email address. Sign in with the invited verified email.");
+        }
+        String shopId = invitationSnapshot.getString("shopId");
+        if (shopId == null || shopId.isBlank()) return new AcceptOutcome(null, HttpStatus.CONFLICT, "The invitation is not linked to a shop.");
+        DocumentReference shop = db.collection(SHOPS).document(shopId);
+        DocumentReference user = db.collection(USERS).document(principal.userId());
+        DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
+        DocumentSnapshot userSnapshot = FirestoreSupport.await(tx.get(user));
+        if (!shopSnapshot.exists() || !"ACTIVE".equals(shopSnapshot.getString("status"))) {
+            return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "Shop operations are blocked because the invited shop is not ACTIVE.");
+        }
+        if (!userSnapshot.exists() || !Boolean.TRUE.equals(userSnapshot.getBoolean("active"))) {
+            return new AcceptOutcome(null, HttpStatus.FORBIDDEN, "This account is inactive or unavailable.");
+        }
+        if (!normalizeEmail(userSnapshot.getString("normalizedEmail")).equals(normalizedEmail)) {
+            return new AcceptOutcome(null, hideEmailMismatch ? HttpStatus.NOT_FOUND : HttpStatus.FORBIDDEN,
+                    hideEmailMismatch ? "Invitation was not found." : "The signed-in account email does not match its verified Firebase email.");
+        }
+        String role = userSnapshot.getString("role");
+        String currentShop = userSnapshot.getString("shopId");
+        if (!"CUSTOMER".equals(role) || (currentShop != null && !currentShop.isBlank())) {
+            return new AcceptOutcome(null, HttpStatus.CONFLICT, "This account cannot join another shop. Only an unassigned customer can accept a staff invitation.");
+        }
+        tx.update(user, Map.of("role", "STAFF", "shopId", shopId,
+                "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+        tx.update(invitation, Map.of("status", "ACCEPTED", "acceptedBy", principal.uid(),
+                "acceptedAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
+                "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+        return new AcceptOutcome(new AcceptResult("STAFF", shopId, shopSnapshot.getString("name"), "ACTIVE"), null, null);
+    }
+
+    private static void requireVerifiedUser(FirebasePrincipal principal) {
+        if (principal == null || principal.userId() == null || principal.uid() == null || !principal.emailVerified()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Sign in with a verified account before continuing.");
+        }
     }
 
     public List<StaffMember> staff(String shopId) {

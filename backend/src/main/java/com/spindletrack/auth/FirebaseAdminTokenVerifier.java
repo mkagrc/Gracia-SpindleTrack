@@ -50,15 +50,32 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         }
     }
 
+    @Override
+    public FirebaseIdentity verifyForInvitationInbox(String idToken) {
+        try {
+            FirebaseToken decoded = firebaseAuth().verifyIdToken(idToken);
+            return identityFromClaimsForInvitationInbox(decoded.getUid(), decoded.getClaims());
+        } catch (FirebaseAuthenticationException exception) {
+            throw exception;
+        } catch (FirebaseAuthException exception) {
+            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "The Firebase ID token is invalid or expired.");
+        }
+    }
+
     static FirebaseIdentity identityFromClaims(String uid, Map<String, Object> claims) {
-        String email = stringClaim(claims, "email");
-        if (!Boolean.TRUE.equals(claims.get("email_verified"))) {
+        FirebaseIdentity identity = identityFromClaimsForInvitationInbox(uid, claims);
+        if (!identity.emailVerified()) {
             throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "Please verify your email address before signing in.");
         }
+        return identity;
+    }
+
+    static FirebaseIdentity identityFromClaimsForInvitationInbox(String uid, Map<String, Object> claims) {
+        String email = stringClaim(claims, "email");
         if (email == null || email.isBlank()) {
-            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "The Firebase account does not have a verified email address.");
+            throw new FirebaseAuthenticationException(HttpStatus.UNAUTHORIZED, "The Firebase account does not have an email address.");
         }
-        return new FirebaseIdentity(uid, email.trim(), stringClaim(claims, "name"));
+        return new FirebaseIdentity(uid, email.trim(), stringClaim(claims, "name"), Boolean.TRUE.equals(claims.get("email_verified")));
     }
 
     Firestore firestore() { return FirestoreClient.getFirestore(firebaseApp()); }

@@ -54,8 +54,12 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
             return;
         }
         try {
-            FirebaseIdentity identity = tokenVerifier.verify(rawToken);
-            UserAccount account = userAccounts.findByFirebaseUid(identity.uid()).orElse(null);
+            boolean invitationInboxRead = "GET".equalsIgnoreCase(request.getMethod())
+                    && "/api/me/invitations".equals(request.getServletPath());
+            FirebaseIdentity identity = invitationInboxRead
+                    ? tokenVerifier.verifyForInvitationInbox(rawToken) : tokenVerifier.verify(rawToken);
+            UserAccount account = identity.emailVerified()
+                    ? userAccounts.findByFirebaseUid(identity.uid()).orElse(null) : null;
             if (account != null && "PLATFORM_ADMIN".equals(account.role())
                     && (adminEmail.isBlank() || !adminEmail.equals(identity.email() == null ? ""
                             : identity.email().trim().toLowerCase(java.util.Locale.ROOT)))) {
@@ -86,7 +90,7 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
                 authorities.add(new SimpleGrantedAuthority("ROLE_" + account.role()));
             }
             FirebasePrincipal principal = new FirebasePrincipal(identity.uid(), identity.email(), identity.displayName(),
-                    userId, role, shopId, shopStatus);
+                    userId, role, shopId, shopStatus, identity.emailVerified());
             SecurityContextHolder.getContext().setAuthentication(
                     new UsernamePasswordAuthenticationToken(principal, null, authorities));
             filterChain.doFilter(request, response);

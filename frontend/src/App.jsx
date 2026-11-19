@@ -6,14 +6,15 @@ import {
   LayoutDashboard, LoaderCircle, LogOut, Menu, Search, ShieldCheck, Store, Upload,
   UserRound, Users, AlertTriangle, Clock3, MapPin, Phone, Mail, Building2, Plus,
 } from 'lucide-react';
-import { createUserWithEmailAndPassword, sendEmailVerification, signOut as firebaseSignOut } from 'firebase/auth';
+import { createUserWithEmailAndPassword, reload as reloadFirebaseUser, sendEmailVerification, signOut as firebaseSignOut } from 'firebase/auth';
 import { auth } from './firebase.js';
 import api, { apiErrorMessage } from './api.js';
 import { useAuth } from './AuthContext.jsx';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
-import { AcceptInvitationPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
+import { AcceptInvitationPage, CustomerInvitationsPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
 import { NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import { getInvitationReturn, postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
 
 const ROLE_HOME = { PLATFORM_ADMIN: '/admin/shops', OWNER: '/owner', STAFF: '/staff', CUSTOMER: '/customer/orders' };
 const ROLE_LABEL = { PLATFORM_ADMIN: 'Platform Admin', OWNER: 'Owner', STAFF: 'Staff', CUSTOMER: 'Customer' };
@@ -63,6 +64,7 @@ function TextAreaField({ label, value, onChange, ...props }) {
 const MENU = {
   CUSTOMER: [
     { label: 'My orders', to: '/customer/orders', icon: ClipboardList },
+    { label: 'Invitations', to: '/customer/invitations', icon: Mail, invitationBadge: true },
     { label: 'Register your shop', to: '/register-shop', icon: Store },
   ],
   OWNER: [
@@ -95,9 +97,23 @@ function AppShell({ children }) {
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [pendingInvitations, setPendingInvitations] = useState(0);
+  const [inviteRefresh, setInviteRefresh] = useState(0);
   const role = session?.role || 'CUSTOMER';
   const menu = MENU[role] || [];
   useEffect(() => setMobileOpen(false), [location.pathname]);
+  useEffect(() => {
+    if (role !== 'CUSTOMER') { setPendingInvitations(0); return undefined; }
+    let active = true;
+    api.get('/api/me/invitations').then(({ data }) => { if (active) setPendingInvitations(Array.isArray(data) ? data.length : 0); })
+      .catch(() => { if (active) setPendingInvitations(0); });
+    return () => { active = false; };
+  }, [role, session?.email, location.pathname, inviteRefresh]);
+  useEffect(() => {
+    const refresh = () => setInviteRefresh((value) => value + 1);
+    window.addEventListener('spindletrack:invitations-changed', refresh);
+    return () => window.removeEventListener('spindletrack:invitations-changed', refresh);
+  }, []);
   const leave = async () => { await signOut(); navigate('/sign-in', { replace: true }); };
   const shopLabel = session?.shop?.name || (role === 'PLATFORM_ADMIN' ? 'Platform workspace' : 'Shop workspace');
   return <div className="min-h-screen bg-canvas text-ink">
@@ -106,7 +122,7 @@ function AppShell({ children }) {
       <div className="px-2"><Brand /></div>
       <div className="mt-8 rounded-2xl bg-slate-50 p-3"><div className="flex items-center gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-brand shadow-sm"><UserRound size={19} /></span><div className="min-w-0"><p className="truncate text-sm font-semibold text-ink">{session?.fullName || 'Signed-in user'}</p><p className="truncate text-xs text-slate-500">{humanRole(role)}</p></div></div><p className="mt-3 truncate border-t border-slate-200 pt-3 text-xs text-slate-500">{shopLabel}</p></div>
       <p className="mb-2 mt-8 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">Workspace</p>
-      <nav aria-label="Main navigation" className="space-y-1">{menu.map((item) => { const Icon = item.icon; return <NavLink key={item.to} to={item.to} end={item.to === '/owner' || item.to === '/staff'} className={({ isActive }) => `flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition ${isActive ? 'bg-teal-50 text-teal-800' : 'text-slate-600 hover:bg-slate-50 hover:text-ink'}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.soon && <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">Soon</span>}</NavLink>; })}</nav>
+      <nav aria-label="Main navigation" className="space-y-1">{menu.map((item) => { const Icon = item.icon; return <NavLink key={item.to} to={item.to} end={item.to === '/owner' || item.to === '/staff'} className={({ isActive }) => `flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition ${isActive ? 'bg-teal-50 text-teal-800' : 'text-slate-600 hover:bg-slate-50 hover:text-ink'}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.invitationBadge && pendingInvitations > 0 && <span aria-label={`${pendingInvitations} pending invitations`} className="grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1.5 text-[10px] font-bold text-white">{pendingInvitations > 9 ? '9+' : pendingInvitations}</span>}{item.soon && <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">Soon</span>}</NavLink>; })}</nav>
       <div className="mt-auto rounded-2xl border border-teal-100 bg-teal-50/70 p-3 text-xs leading-5 text-teal-900"><div className="flex items-center gap-2 font-semibold"><ShieldCheck size={16} />Private by design</div><p className="mt-1 text-teal-800/80">Your access is limited to the role and shop assigned to your account.</p></div>
       <button type="button" onClick={leave} className="mt-3 flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold text-slate-600 transition hover:bg-red-50 hover:text-red-700"><LogOut size={18} />Sign out</button>
     </aside>
@@ -128,13 +144,38 @@ function HomePage() {
 }
 function SignInPage() {
   const navigate = useNavigate(); const location = useLocation();
-  const { signInGoogle, signInEmail, sessionError, clearSessionError } = useAuth();
-  const [mode, setMode] = useState('signin'); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState('');
+  const { signInGoogle, signInEmail, syncSession, sessionError, clearSessionError } = useAuth();
+  const [mode, setMode] = useState(new URLSearchParams(location.search).get('mode') === 'create' ? 'create' : 'signin'); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const fromState = location.state?.from;
+  const inviteReturn = getInvitationReturn() || (fromState?.pathname === '/accept-invitation' ? `${fromState.pathname}${fromState.search || ''}${fromState.hash || ''}` : '');
+  const verificationSettings = inviteReturn ? { url: new URL(inviteReturn, window.location.origin).toString() } : undefined;
   const go = (session) => {
-    const destination = location.state?.from;
-    const returnPath = destination ? `${destination.pathname || '/'}${destination.search || ''}${destination.hash || ''}` : homeFor(session);
+    const target = location.state?.from;
+    const fallback = target ? `${target.pathname || '/'}${target.search || ''}${target.hash || ''}` : '';
+    const returnPath = takeInvitationReturn() || postAuthDestination(session, fallback);
     navigate(returnPath, { replace: true });
+  };
+  const resendVerification = async () => {
+    const user = auth.currentUser;
+    if (!user) { setError('Sign in with the account you are verifying before requesting another verification email.'); return; }
+    setVerifyBusy(true); setError('');
+    try { await sendEmailVerification(user, verificationSettings); setNotice(`Verification email sent to ${user.email || 'your email address'}.`); }
+    catch (reason) { setError(apiErrorMessage(reason, 'The verification email could not be resent.')); }
+    finally { setVerifyBusy(false); }
+  };
+  const checkVerification = async () => {
+    const user = auth.currentUser;
+    if (!user) { setError('Sign in again after verifying your email.'); return; }
+    setVerifyBusy(true); setError('');
+    try {
+      await reloadFirebaseUser(user);
+      if (!user.emailVerified) { setError('Your email is still waiting for verification. Open the verification link, then try again.'); return; }
+      await user.getIdToken(true);
+      go(await syncSession(user));
+    } catch (reason) { setError(apiErrorMessage(reason, 'Your verified session could not be refreshed.')); }
+    finally { setVerifyBusy(false); }
   };
   const friendly = (reason) => {
     const code = reason?.code || '';
@@ -151,12 +192,15 @@ function SignInPage() {
       if (mode === 'create') {
         if (password !== confirm) throw new Error('Passwords do not match.');
         const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        await sendEmailVerification(credential.user); await firebaseSignOut(auth); setMode('signin'); setPassword(''); setConfirm('');
-        setNotice(`Verification email sent to ${email.trim()}. Verify your email, then sign in.`);
+        await sendEmailVerification(credential.user, verificationSettings);
+        if (!inviteReturn) await firebaseSignOut(auth);
+        setMode('signin'); setPassword(''); setConfirm('');
+        setNotice(`Waiting for email verification. A verification email was sent to ${email.trim()}.`);
       } else go(await signInEmail(email.trim(), password));
     } catch (e) { setError(friendly(e)); } finally { setBusy(false); }
   };
-  return <PublicFrame><main className="mx-auto flex w-full max-w-xl flex-1 items-center px-5 py-10"><section className="w-full rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-10"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-teal-50 text-brand"><Droplets size={28} /></div><h1 className="mt-5 text-center text-2xl font-semibold text-ink">{mode === 'create' ? 'Create your account' : 'Welcome back'}</h1><p className="mt-2 text-center text-sm leading-6 text-slate-500">Sign in to your secure shop workspace. Email/password accounts must verify their email.</p><ErrorBanner error={error || sessionError} />{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}<button type="button" onClick={doGoogle} disabled={busy} className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{busy ? <LoaderCircle size={18} className="animate-spin" /> : <span className="font-bold text-blue-600">G</span>}Continue with Google</button><div className="my-6 flex items-center gap-3 text-[10px] uppercase tracking-widest text-slate-400"><span className="h-px flex-1 bg-slate-200" />or email and password<span className="h-px flex-1 bg-slate-200" /></div><form className="space-y-4" onSubmit={doSubmit}><TextField label="Email address" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} /><TextField label="Password" type="password" required minLength={6} autoComplete={mode === 'create' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} />{mode === 'create' && <TextField label="Confirm password" type="password" required minLength={6} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />}<button disabled={busy} className="min-h-12 w-full rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Please wait…' : mode === 'create' ? 'Create account and verify email' : 'Sign in'}</button></form><p className="mt-5 text-center text-sm text-slate-600">{mode === 'create' ? 'Already have an account?' : 'New to SpindleTrack?'} <button type="button" onClick={() => { setMode(mode === 'create' ? 'signin' : 'create'); setError(''); setNotice(''); }} className="font-semibold text-brand">{mode === 'create' ? 'Sign in' : 'Create an account'}</button></p><p className="mt-3 text-center text-xs leading-5 text-slate-400">New accounts start as customers. A verified email is required to continue.</p></section></main></PublicFrame>;
+  const waitingForInviteVerification = Boolean(inviteReturn && auth.currentUser && !auth.currentUser.emailVerified);
+  return <PublicFrame><main className="mx-auto flex w-full max-w-xl flex-1 items-center px-5 py-10"><section className="w-full rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-10"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-teal-50 text-brand"><Droplets size={28} /></div><h1 className="mt-5 text-center text-2xl font-semibold text-ink">{waitingForInviteVerification ? 'Waiting for email verification' : mode === 'create' ? 'Create your account' : 'Welcome back'}</h1><p className="mt-2 text-center text-sm leading-6 text-slate-500">Sign in to your secure shop workspace. Email/password accounts must verify their email.</p><ErrorBanner error={error || sessionError} />{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}{waitingForInviteVerification && <div className="mt-4 flex flex-wrap justify-center gap-2"><button type="button" disabled={verifyBusy} onClick={resendVerification} className="min-h-10 rounded-xl border border-slate-200 px-3 text-sm font-semibold">{verifyBusy ? 'Please wait…' : 'Resend verification email'}</button><button type="button" disabled={verifyBusy} onClick={checkVerification} className="min-h-10 rounded-xl bg-brand px-3 text-sm font-semibold text-white">I’ve verified my email</button></div>}<button type="button" onClick={doGoogle} disabled={busy} className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{busy ? <LoaderCircle size={18} className="animate-spin" /> : <span className="font-bold text-blue-600">G</span>}Continue with Google</button><div className="my-6 flex items-center gap-3 text-[10px] uppercase tracking-widest text-slate-400"><span className="h-px flex-1 bg-slate-200" />or email and password<span className="h-px flex-1 bg-slate-200" /></div><form className="space-y-4" onSubmit={doSubmit}><TextField label="Email address" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} /><TextField label="Password" type="password" required minLength={6} autoComplete={mode === 'create' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} />{mode === 'create' && <TextField label="Confirm password" type="password" required minLength={6} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />}<button disabled={busy} className="min-h-12 w-full rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Please wait…' : mode === 'create' ? 'Create account and verify email' : 'Sign in'}</button></form><p className="mt-5 text-center text-sm text-slate-600">{mode === 'create' ? 'Already have an account?' : 'New to SpindleTrack?'} <button type="button" onClick={() => { setMode(mode === 'create' ? 'signin' : 'create'); setError(''); setNotice(''); }} className="font-semibold text-brand">{mode === 'create' ? 'Sign in' : 'Create an account'}</button></p><p className="mt-3 text-center text-xs leading-5 text-slate-400">New accounts start as customers. A verified email is required to continue.</p></section></main></PublicFrame>;
 }
 
 function RoleGuard({ roles, children }) {
@@ -174,7 +218,8 @@ function CustomerOrdersPage() {
 }
 function StaffDashboard() {
   const { session } = useAuth();
-  return <><PageHeading eyebrow="Staff workspace" title={`Welcome${session?.fullName ? `, ${session.fullName}` : ''}`} description="Your shop workspace is ready." /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Assigned shop</p><h2 className="mt-1 text-xl font-semibold">{session?.shop?.name || 'Shop name unavailable'}</h2><div className="mt-2 flex items-center gap-2"><StatusPill status={session?.shop?.status || session?.shopStatus} /></div></div></div><p className="mt-6 max-w-2xl text-sm leading-6 text-slate-500">Create orders for customers and advance each one through the shop’s laundry stages. Service and order data stays within this shop.</p></section></>;
+  const location = useLocation(); const [toast, setToast] = useState(location.state?.toast ? { type: 'success', message: location.state.toast } : null);
+  return <><Toast type={toast?.type} message={toast?.message} onDismiss={() => setToast(null)} /><PageHeading eyebrow="Staff workspace" title={`Welcome${session?.fullName ? `, ${session.fullName}` : ''}`} description="Your shop workspace is ready." /><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="flex flex-wrap items-start gap-4"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></span><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Assigned shop</p><h2 className="mt-1 text-xl font-semibold">{session?.shop?.name || 'Shop name unavailable'}</h2><div className="mt-2 flex items-center gap-2"><StatusPill status={session?.shop?.status || session?.shopStatus} /></div></div></div><p className="mt-6 max-w-2xl text-sm leading-6 text-slate-500">Create orders for customers and advance each one through the shop’s laundry stages. Service and order data stays within this shop.</p></section></>;
 }
 function OwnerStaffPresenceCard() {
   const { session } = useAuth();
@@ -379,11 +424,14 @@ function AdminUsersPage() {
 
 function AppRoutes() {
   const { session, loading } = useAuth();
+  const location = useLocation();
+  useEffect(() => { if (!session) rememberInvitationReturn(location); }, [location.pathname, location.search, session]);
   if (loading) return <LoadingState label="Checking your account…" />;
-  if (!session) return <Routes><Route path="/accept-invitation" element={<AcceptInvitationPage />} /><Route path="/sign-in" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
+  if (!session) return <Routes><Route path="/accept-invitation" element={<AcceptInvitationPage />} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
   return <AppShell><Routes>
-    <Route path="/" element={<Navigate to={homeFor(session)} replace />} />
+    <Route path="/" element={<Navigate to={postAuthDestination(session, '')} replace />} />
     <Route path="/customer/orders" element={<RoleGuard roles={['CUSTOMER']}><CustomerOrdersPage /></RoleGuard>} />
+    <Route path="/customer/invitations" element={<RoleGuard roles={['CUSTOMER']}><CustomerInvitationsPage /></RoleGuard>} />
     <Route path="/register-shop" element={<RoleGuard roles={['CUSTOMER']}><ShopRegistrationPage /></RoleGuard>} />
     <Route path="/owner" element={<RoleGuard roles={['OWNER']}><><OwnerDashboard /><OwnerStaffPresenceCard /></></RoleGuard>} />
     <Route path="/shop-status" element={<Navigate to="/owner" replace />} />
@@ -404,7 +452,8 @@ function AppRoutes() {
     <Route path="/admin/shops/:id" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopDetailPage /></RoleGuard>} />
     <Route path="/admin/users" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminUsersPage /></RoleGuard>} />
     <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
-    <Route path="/sign-in" element={<Navigate to={homeFor(session)} replace />} />
+    <Route path="/sign-in" element={<Navigate to={postAuthDestination(session, '')} replace />} />
+    <Route path="/create-account" element={<Navigate to={postAuthDestination(session, '')} replace />} />
     <Route path="*" element={<Navigate to={homeFor(session)} replace />} />
   </Routes></AppShell>;
 }

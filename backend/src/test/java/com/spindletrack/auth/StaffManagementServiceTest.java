@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -76,6 +77,123 @@ class StaffManagementServiceTest {
         verify(f.transaction).update(eq(f.userRef), any(Map.class));
         verify(f.transaction).update(eq(f.invitationRef), any(Map.class));
         verify(f.firebase).setSessionClaims("firebase-uid-1", "STAFF", "shop-string-A");
+    }
+
+    @Test
+    void inboxReturnsOnlyMatchingPendingNonExpiredInvitationWithShopName() throws Exception {
+        Fixture f = fixture();
+        Query emailQuery = mock(Query.class);
+        QuerySnapshot rows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot matching = mock(QueryDocumentSnapshot.class);
+        Timestamp expiry = Timestamp.of(Date.from(Instant.now().plusSeconds(3600)));
+        when(f.invitationCollection.whereEqualTo("normalizedEmail", "staff@example.com")).thenReturn(emailQuery);
+        when(emailQuery.get()).thenReturn(ApiFutures.immediateFuture(rows));
+        when(rows.getDocuments()).thenReturn(List.of(matching));
+        when(matching.getId()).thenReturn("invite-string-A");
+        when(matching.getString("status")).thenReturn("PENDING");
+        when(matching.getString("shopId")).thenReturn("shop-string-A");
+        when(matching.get("createdAt")).thenReturn(Timestamp.of(Date.from(Instant.now().minusSeconds(60))));
+        when(matching.get("expiresAt")).thenReturn(expiry);
+        when(f.shopRef.get()).thenReturn(ApiFutures.immediateFuture(f.shopSnapshot));
+        when(f.shopSnapshot.exists()).thenReturn(true);
+        when(f.shopSnapshot.getString("name")).thenReturn("Active Laundry");
+
+        List<StaffManagementService.InboxInvitation> inbox = service(f).invitationsForUser(principal("STAFF@EXAMPLE.COM", "CUSTOMER"));
+
+        assertEquals(1, inbox.size());
+        assertEquals("invite-string-A", inbox.get(0).id());
+        assertEquals("Active Laundry", inbox.get(0).shopName());
+        assertEquals(expiry.toDate().toInstant(), inbox.get(0).expiresAt());
+        verify(f.invitationCollection).whereEqualTo("normalizedEmail", "staff@example.com");
+    }
+
+    @Test
+    void otherOrUnverifiedEmailGetsNoInboxInvitations() {
+        Fixture f = fixture();
+        Query differentEmailQuery = mock(Query.class);
+        QuerySnapshot noRows = mock(QuerySnapshot.class);
+        when(f.invitationCollection.whereEqualTo("normalizedEmail", "other@example.com")).thenReturn(differentEmailQuery);
+        when(differentEmailQuery.get()).thenReturn(ApiFutures.immediateFuture(noRows));
+        when(noRows.getDocuments()).thenReturn(List.of());
+        StaffManagementService service = service(f);
+        assertEquals(List.of(), service.invitationsForUser(principal("other@example.com", "CUSTOMER")));
+        verify(f.invitationCollection).whereEqualTo("normalizedEmail", "other@example.com");
+
+        FirebasePrincipal unverified = new FirebasePrincipal("firebase-uid-1", "staff@example.com", "Staff",
+                "firestore-user-1", "CUSTOMER", null, null, false);
+        Fixture unverifiedFixture = fixture();
+        assertEquals(List.of(), service(unverifiedFixture).invitationsForUser(unverified));
+        verify(unverifiedFixture.firebase, never()).firestore();
+    }
+
+    @Test
+    void acceptingByInvitationIdCreatesStaffOnceAndRejectsReuse() throws Exception {
+        Fixture f = acceptanceFixture("PENDING", "staff@example.com", "CUSTOMER", null,
+                Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        QueryDocumentSnapshot invitation = mock(QueryDocumentSnapshot.class);
+        when(invitation.exists()).thenReturn(true);
+        when(invitation.getReference()).thenReturn(f.invitationRef);
+        when(invitation.getString("status")).thenReturn("PENDING", "ACCEPTED");
+        when(invitation.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(invitation.getString("shopId")).thenReturn("shop-string-A");
+        when(invitation.get("expiresAt")).thenReturn(Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        when(f.invitationCollection.document("invite-string-A")).thenReturn(f.invitationRef);
+        when(f.transaction.get(f.invitationRef)).thenReturn(ApiFutures.immediateFuture(invitation));
+        StaffManagementService service = service(f);
+
+        assertEquals("STAFF", service.acceptById("invite-string-A", principal("staff@example.com", "CUSTOMER")).role());
+        ResponseStatusException reused = assertThrows(ResponseStatusException.class,
+                () -> service.acceptById("invite-string-A", principal("staff@example.com", "CUSTOMER")));
+
+        assertEquals(HttpStatus.CONFLICT, reused.getStatusCode());
+        verify(f.transaction, times(1)).update(eq(f.userRef), any(Map.class));
+        verify(f.firebase, times(1)).setSessionClaims("firebase-uid-1", "STAFF", "shop-string-A");
+    }
+
+    @Test
+    void wrongUserGetsNotFoundAndOwnerCannotAcceptById() throws Exception {
+        Fixture wrong = acceptanceFixture("PENDING", "invited@example.com", "CUSTOMER", null,
+                Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        QueryDocumentSnapshot wrongInvite = mock(QueryDocumentSnapshot.class);
+        when(wrong.invitationCollection.document("invite-string-A")).thenReturn(wrong.invitationRef);
+        when(wrong.transaction.get(wrong.invitationRef)).thenReturn(ApiFutures.immediateFuture(wrongInvite));
+        when(wrongInvite.exists()).thenReturn(true);
+        when(wrongInvite.getString("normalizedEmail")).thenReturn("invited@example.com");
+        ResponseStatusException hidden = assertThrows(ResponseStatusException.class, () ->
+                service(wrong).acceptById("invite-string-A", principal("other@example.com", "CUSTOMER")));
+        assertEquals(HttpStatus.NOT_FOUND, hidden.getStatusCode());
+
+        Fixture owner = acceptanceFixture("PENDING", "staff@example.com", "OWNER", null,
+                Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        QueryDocumentSnapshot ownerInvite = mock(QueryDocumentSnapshot.class);
+        when(owner.invitationCollection.document("invite-string-A")).thenReturn(owner.invitationRef);
+        when(owner.transaction.get(owner.invitationRef)).thenReturn(ApiFutures.immediateFuture(ownerInvite));
+        when(ownerInvite.exists()).thenReturn(true);
+        when(ownerInvite.getReference()).thenReturn(owner.invitationRef);
+        when(ownerInvite.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(ownerInvite.getString("status")).thenReturn("PENDING");
+        when(ownerInvite.getString("shopId")).thenReturn("shop-string-A");
+        when(ownerInvite.get("expiresAt")).thenReturn(Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        ResponseStatusException forbidden = assertThrows(ResponseStatusException.class, () ->
+                service(owner).acceptById("invite-string-A", principal("staff@example.com", "OWNER")));
+        assertEquals(HttpStatus.CONFLICT, forbidden.getStatusCode());
+        verify(owner.transaction, never()).update(any(DocumentReference.class), any(Map.class));
+    }
+
+    @Test
+    void matchingUserCanDeclineInvitation() throws Exception {
+        Fixture f = fixture();
+        DocumentSnapshot invitation = mock(DocumentSnapshot.class);
+        when(f.invitationCollection.document("invite-string-A")).thenReturn(f.invitationRef);
+        when(f.transaction.get(f.invitationRef)).thenReturn(ApiFutures.immediateFuture(invitation));
+        when(invitation.exists()).thenReturn(true);
+        when(invitation.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(invitation.getString("status")).thenReturn("PENDING");
+        when(invitation.get("expiresAt")).thenReturn(Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        runTransaction(f.db, f.transaction);
+
+        assertEquals("DECLINED", service(f).decline("invite-string-A", principal("staff@example.com", "CUSTOMER")).status());
+        verify(f.transaction).update(eq(f.invitationRef), org.mockito.ArgumentMatchers.argThat(fields -> "DECLINED".equals(fields.get("status"))));
     }
 
     @Test
@@ -226,6 +344,9 @@ class StaffManagementServiceTest {
         when(invitation.getString("normalizedEmail")).thenReturn(invitedEmail);
         when(invitation.getString("shopId")).thenReturn("shop-string-A");
         when(invitation.get("expiresAt")).thenReturn(expiresAt);
+        when(f.invitationCollection.document("invite-string-A")).thenReturn(f.invitationRef);
+        when(f.invitationRef.get()).thenReturn(ApiFutures.immediateFuture(invitation));
+        when(f.transaction.get(f.invitationRef)).thenReturn(ApiFutures.immediateFuture(invitation));
         when(f.db.collection("shops")).thenReturn(f.shopCollection);
         when(f.shopCollection.document("shop-string-A")).thenReturn(f.shopRef);
         when(f.shopSnapshot.exists()).thenReturn(true);

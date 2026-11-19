@@ -73,3 +73,28 @@ class StaffInvitationAcceptanceController {
         return staff.accept(request.token(), principal);
     }
 }
+
+@RestController
+@RequestMapping("/api/me/invitations")
+@PreAuthorize("hasRole('AUTHENTICATED')")
+class MyInvitationController {
+    private final StaffManagementService staff;
+    MyInvitationController(StaffManagementService staff) { this.staff = staff; }
+
+    @GetMapping
+    public List<StaffManagementService.InboxInvitation> list(@AuthenticationPrincipal FirebasePrincipal principal) {
+        return staff.invitationsForUser(principal);
+    }
+
+    @PostMapping("/{invitationId}/accept")
+    public StaffManagementService.AcceptResult accept(@PathVariable String invitationId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return staff.acceptById(invitationId, principal);
+    }
+
+    @PostMapping("/{invitationId}/decline")
+    public StaffManagementService.InvitationActionResult decline(@PathVariable String invitationId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return staff.decline(invitationId, principal);
+    }
+}
