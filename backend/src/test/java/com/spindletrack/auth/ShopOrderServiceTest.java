@@ -85,7 +85,7 @@ class ShopOrderServiceTest {
         when(f.orders.whereEqualTo("shopId", "shop-string-A")).thenReturn(query);
         when(query.get()).thenReturn(ApiFutures.immediateFuture(rows));
         when(rows.getDocuments()).thenReturn(List.of());
-        assertEquals(0, new ShopOrderService(f.firebase).list(f.owner(), null, null, 0).getTotalElements());
+        assertEquals(0L, new ShopOrderService(f.firebase).list(f.owner(), null, null, 0).totalElements());
         verify(f.orders).whereEqualTo("shopId", "shop-string-A");
     }
 
