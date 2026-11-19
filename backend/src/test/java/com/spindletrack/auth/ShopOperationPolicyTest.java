@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 
 class ShopOperationPolicyTest {
     private static final List<String> SHOP_OPERATION_PATHS = List.of(
-            "/api/orders", "/api/services", "/api/staff-invitations", "/api/reports");
+            "/api/orders", "/api/services", "/api/staff-invitations", "/api/reports",
+            "/api/shops/services", "/api/shops/services/service-string-7f9a/edit",
+            "/api/shops/mine/staff", "/api/shops/mine/staff/invitations/invite-string-42/revoke");
     private static final List<String> INACTIVE_STATUSES = List.of("PENDING", "REJECTED", "DEACTIVATED");
 
     @Test
