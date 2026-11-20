@@ -434,7 +434,8 @@ public class ShopOrderService {
             update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             tx.update(order, update);
             if (paymentRecordId != null) tx.update(db.collection(PAYMENTS).document(paymentRecordId), Map.of(
-                    "status", "PAID", "externalPaymentId", verified.id(), "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+                    "status", "PAID", "externalPaymentId", verified.id(), "paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             return withPayment(mapOrder(current), "PAID", "ONLINE", paidAt, "PAYMONGO", "PayMongo");
         });
     }
@@ -487,8 +488,24 @@ public class ShopOrderService {
             if (next == LaundryStage.CLAIMED && !isPaid(current)) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "Order must be paid before it can be claimed");
             }
-            tx.update(order, Map.of("stage", next.name(), "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            Map<String, Object> stageUpdate = new HashMap<>();
+            stageUpdate.put("stage", next.name());
+            stageUpdate.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            if (next == LaundryStage.READY) stageUpdate.put("readyAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.update(order, stageUpdate);
             tx.create(history, historyValues(shopId, id, next, changedBy, changedByName));
+            if (next == LaundryStage.READY && current.getString("customerUserId") != null
+                    && !current.getString("customerUserId").isBlank()) {
+                DocumentReference notification = db.collection("notificationOutbox").document(id + "_READY");
+                Map<String, Object> event = new HashMap<>();
+                event.put("eventId", id + "_READY"); event.put("eventType", "READY");
+                event.put("shopId", shopId); event.put("orderId", id);
+                event.put("customerUserId", current.getString("customerUserId"));
+                event.put("status", "PENDING"); event.put("attempts", 0);
+                event.put("nextAttemptAtMillis", System.currentTimeMillis());
+                event.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                tx.create(notification, event);
+            }
             return replaceStage(mapOrder(current), next);
         });
     }
@@ -522,6 +539,7 @@ public class ShopOrderService {
         values.put("createdByName", actorName); values.put("paymentLinkId", linkId);
         values.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
         values.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+        if ("PAID".equals(status)) values.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
         return values;
     }
     private static void clearOnlineLink(Map<String, Object> values) {

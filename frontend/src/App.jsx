@@ -14,6 +14,7 @@ import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
 import { AcceptInvitationPage, CustomerInvitationsPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
 import { CustomerOrderDetailPage, CustomerOrdersPage, NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import { OwnerDashboardMetrics, OwnerReportsPage, OwnerUnclaimedPage } from './OwnerOperationsPages.jsx';
 import PublicOrderLookupPage from './PublicOrderLookupPage.jsx';
 import { getInvitationReturn, postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
 import { customerMenuForInvitations, dismissInvitationPrompt, undismissedInvitations } from './invitationInbox.js';
@@ -75,8 +76,8 @@ const MENU = {
     { label: 'Orders', to: '/owner/orders', icon: ClipboardList },
     { label: 'Services', to: '/owner/services', icon: Activity },
     { label: 'Staff', to: '/owner/staff', icon: Users },
-    { label: 'Unclaimed', to: '/owner/unclaimed', icon: CircleHelp, soon: true },
-    { label: 'Reports', to: '/owner/reports', icon: FileCheck2, soon: true },
+    { label: 'Unclaimed', to: '/owner/unclaimed', icon: CircleHelp },
+    { label: 'Reports', to: '/owner/reports', icon: FileCheck2 },
     { label: 'Shop profile', to: '/owner/profile', icon: Store },
   ],
   STAFF: [
@@ -480,7 +481,7 @@ function AppRoutes() {
     <Route path="/customer/orders/:orderId" element={<RoleGuard roles={['CUSTOMER']}><CustomerOrderDetailPage /></RoleGuard>} />
     <Route path="/customer/invitations" element={<RoleGuard roles={['CUSTOMER']}><CustomerInvitationsPage /></RoleGuard>} />
     <Route path="/register-shop" element={<RoleGuard roles={['CUSTOMER']}><ShopRegistrationPage /></RoleGuard>} />
-    <Route path="/owner" element={<RoleGuard roles={['OWNER']}><><OwnerDashboard /><OwnerStaffPresenceCard /></></RoleGuard>} />
+    <Route path="/owner" element={<RoleGuard roles={['OWNER']}><><OwnerDashboard /><OwnerDashboardMetrics /><OwnerStaffPresenceCard /></></RoleGuard>} />
     <Route path="/shop-status" element={<Navigate to="/owner" replace />} />
     <Route path="/owner/profile" element={<RoleGuard roles={['OWNER']}><ShopProfilePage /></RoleGuard>} />
     <Route path="/shop-registration" element={<RoleGuard roles={['OWNER']}><RegistrationStatusPage /></RoleGuard>} />
@@ -488,8 +489,8 @@ function AppRoutes() {
     <Route path="/owner/orders/:orderId" element={<RoleGuard roles={['OWNER']}><OrderDetailPage readOnly /></RoleGuard>} />
     <Route path="/owner/services" element={<RoleGuard roles={['OWNER']}><OwnerServicesPage /></RoleGuard>} />
     <Route path="/owner/staff" element={<RoleGuard roles={['OWNER']}><OwnerStaffPage /></RoleGuard>} />
-    <Route path="/owner/unclaimed" element={<RoleGuard roles={['OWNER']}><SoonPage title="Unclaimed items" /></RoleGuard>} />
-    <Route path="/owner/reports" element={<RoleGuard roles={['OWNER']}><SoonPage title="Reports" /></RoleGuard>} />
+    <Route path="/owner/unclaimed" element={<RoleGuard roles={['OWNER']}><OwnerUnclaimedPage /></RoleGuard>} />
+    <Route path="/owner/reports" element={<RoleGuard roles={['OWNER']}><OwnerReportsPage /></RoleGuard>} />
     <Route path="/staff" element={<RoleGuard roles={['STAFF']}><><StaffDashboard /><StaffServicesPanel /></></RoleGuard>} />
     <Route path="/staff/new-order" element={<RoleGuard roles={['STAFF']}><NewOrderPage /></RoleGuard>} />
     <Route path="/staff/orders" element={<RoleGuard roles={['STAFF']}><OrdersListPage /></RoleGuard>} />

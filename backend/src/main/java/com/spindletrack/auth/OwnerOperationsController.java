@@ -1,0 +1,28 @@
+package com.spindletrack.auth;
+
+import java.util.List;
+
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/shops/mine")
+public class OwnerOperationsController {
+    private final OwnerOperationsService operations;
+    public OwnerOperationsController(OwnerOperationsService operations) { this.operations = operations; }
+
+    @GetMapping("/unclaimed")
+    @PreAuthorize("hasRole('OWNER')")
+    public List<OwnerOperationsService.UnclaimedOrder> unclaimed(@AuthenticationPrincipal FirebasePrincipal principal) {
+        return operations.unclaimed(principal);
+    }
+
+    @GetMapping("/reports")
+    @PreAuthorize("hasRole('OWNER')")
+    public OwnerOperationsService.OwnerReport reports(@AuthenticationPrincipal FirebasePrincipal principal) {
+        return operations.report(principal);
+    }
+}

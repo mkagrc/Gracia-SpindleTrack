@@ -72,7 +72,10 @@ public class AdminShopService {
         long start = (long) page * PAGE_SIZE;
         List<ShopListItem> content = start >= total ? List.of() : filtered.subList((int) start,
                 (int) Math.min(total, start + PAGE_SIZE));
-        return new PageResult(content, page, PAGE_SIZE, total);
+        List<ShopListItem> counted = content.stream().map(item -> new ShopListItem(item.id(), item.name(),
+                item.ownerName(), item.ownerEmail(), item.registrationDate(), item.status(), item.staffCount(),
+                countOrders(db, item.id()))).toList();
+        return new PageResult(counted, page, PAGE_SIZE, total);
     }
 
     public ShopDetail detail(String id) {
@@ -88,7 +91,7 @@ public class AdminShopService {
                 .sorted(Comparator.comparing(ShopStaff::name, Comparator.nullsLast(String::compareToIgnoreCase))).toList();
         return new ShopDetail(id, shop.getString("name"), shop.getString("address"), shop.getString("contactNumber"),
                 shop.getString("status"), shop.getString("rejectionReason"), FirestoreSupport.dateTime(shop.get("createdAt")),
-                owner, staff, documents.findMetadataForShop(id), staff.size(), 0);
+                owner, staff, documents.findMetadataForShop(id), staff.size(), countOrders(db, id));
     }
 
     public void transition(String shopId, String target, String reason, String adminId) {
@@ -130,6 +133,10 @@ public class AdminShopService {
 
     private static boolean contains(String value, String term) {
         return value != null && value.toLowerCase(Locale.ROOT).contains(term);
+    }
+
+    private static int countOrders(Firestore db, String shopId) {
+        return FirestoreSupport.await(db.collection("orders").whereEqualTo("shopId", shopId).get()).getDocuments().size();
     }
 
     private static String userName(DocumentSnapshot user) {
