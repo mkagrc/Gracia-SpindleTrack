@@ -43,6 +43,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/health", "/error").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/public/orders/lookup").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/session").authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/shops/register").hasRole("CUSTOMER")
                         .requestMatchers(HttpMethod.GET, "/api/shops/mine/registration").hasRole("OWNER")

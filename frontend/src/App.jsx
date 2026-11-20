@@ -13,7 +13,8 @@ import { useAuth } from './AuthContext.jsx';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
 import { AcceptInvitationPage, CustomerInvitationsPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
-import { NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import { CustomerOrderDetailPage, CustomerOrdersPage, NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import PublicOrderLookupPage from './PublicOrderLookupPage.jsx';
 import { getInvitationReturn, postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
 import { customerMenuForInvitations, dismissInvitationPrompt, undismissedInvitations } from './invitationInbox.js';
 
@@ -187,7 +188,7 @@ function PublicFrame({ children }) {
 function HomePage() {
   const { session } = useAuth();
   if (session) return <Navigate to={homeFor(session)} replace />;
-  return <PublicFrame><main className="mx-auto grid w-full max-w-7xl flex-1 items-center gap-12 px-5 py-12 sm:px-8 lg:grid-cols-[1.08fr_.92fr] lg:py-20"><section><span className="inline-flex items-center gap-2 rounded-full border border-teal-100 bg-white px-3 py-1.5 text-xs font-semibold text-teal-800"><Droplets size={15} />Laundry operations, made simpler</span><h1 className="mt-6 max-w-3xl text-4xl font-semibold leading-tight tracking-tight text-ink sm:text-5xl lg:text-6xl">A calmer way to run your <span className="text-brand">laundry shop.</span></h1><p className="mt-5 max-w-xl text-base leading-7 text-slate-600">SpindleTrack gives each shop a secure workspace, with platform review before operations begin.</p><div className="mt-8 flex flex-wrap gap-3"><Link to="/sign-in" className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-brand px-5 font-semibold text-white shadow-sm hover:bg-teal-700">Get started <ArrowRight size={17} /></Link></div></section><section className="rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-9"><div className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></div><p className="mt-6 text-xs font-bold uppercase tracking-[.16em] text-slate-400">Getting started</p><h2 className="mt-2 text-2xl font-semibold">Verified accounts. Reviewed shops.</h2><ul className="mt-6 space-y-4 text-sm text-slate-600">{['Sign in securely with Google or email.', 'Submit your shop profile and documents.', 'Start using shop tools after approval.'].map((line) => <li key={line} className="flex items-start gap-3"><Check size={17} className="mt-0.5 shrink-0 text-emerald-600" />{line}</li>)}</ul><div className="mt-7 rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">One owner account is linked to one shop. Each workspace is scoped to its shop.</div></section></main></PublicFrame>;
+  return <PublicFrame><main className="mx-auto grid w-full max-w-7xl flex-1 items-center gap-12 px-5 py-12 sm:px-8 lg:grid-cols-[1.08fr_.92fr] lg:py-20"><section><span className="inline-flex items-center gap-2 rounded-full border border-teal-100 bg-white px-3 py-1.5 text-xs font-semibold text-teal-800"><Droplets size={15} />Laundry operations, made simpler</span><h1 className="mt-6 max-w-3xl text-4xl font-semibold leading-tight tracking-tight text-ink sm:text-5xl lg:text-6xl">A calmer way to run your <span className="text-brand">laundry shop.</span></h1><p className="mt-5 max-w-xl text-base leading-7 text-slate-600">SpindleTrack gives each shop a secure workspace, with platform review before operations begin.</p><div className="mt-8 flex flex-wrap gap-3"><Link to="/sign-in" className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-brand px-5 font-semibold text-white shadow-sm hover:bg-teal-700">Get started <ArrowRight size={17} /></Link><Link to="/track-order" className="inline-flex min-h-12 items-center rounded-xl border border-slate-200 bg-white px-5 font-semibold text-slate-700 hover:bg-slate-50">Track an order</Link></div></section><section className="rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-9"><div className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-50 text-brand"><Store size={23} /></div><p className="mt-6 text-xs font-bold uppercase tracking-[.16em] text-slate-400">Getting started</p><h2 className="mt-2 text-2xl font-semibold">Verified accounts. Reviewed shops.</h2><ul className="mt-6 space-y-4 text-sm text-slate-600">{['Sign in securely with Google or email.', 'Submit your shop profile and documents.', 'Start using shop tools after approval.'].map((line) => <li key={line} className="flex items-start gap-3"><Check size={17} className="mt-0.5 shrink-0 text-emerald-600" />{line}</li>)}</ul><div className="mt-7 rounded-2xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">One owner account is linked to one shop. Each workspace is scoped to its shop.</div></section></main></PublicFrame>;
 }
 function SignInPage() {
   const navigate = useNavigate(); const location = useLocation();
@@ -259,9 +260,6 @@ function RoleGuard({ roles, children }) {
 }
 function SoonPage({ title }) {
   return <><PageHeading eyebrow="Coming soon" title={title} description="This feature is not available yet. SpindleTrack will show it here when the supporting backend workflow is ready." /><EmptyState icon={Clock3} title={`${title} is not built yet`}>No placeholder records are displayed. For now, use the available shop status and profile features.</EmptyState></>;
-}
-function CustomerOrdersPage() {
-  return <><PageHeading eyebrow="Customer" title="My orders" description="Your personal laundry orders will appear here when the order endpoints are available." /><EmptyState title="No orders to show" icon={ClipboardList}>Order tracking is not available yet. This page intentionally does not display sample or placeholder orders.</EmptyState></>;
 }
 function StaffDashboard() {
   const { session } = useAuth();
@@ -474,10 +472,12 @@ function AppRoutes() {
   const location = useLocation();
   useEffect(() => { if (!session) rememberInvitationReturn(location); }, [location.pathname, location.search, session]);
   if (loading) return <LoadingState label="Checking your account…" />;
-  if (!session) return <Routes><Route path="/accept-invitation" element={<AcceptInvitationPage />} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
+  if (!session) return <Routes><Route path="/accept-invitation" element={<AcceptInvitationPage />} /><Route path="/track-order" element={<PublicOrderLookupPage />} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
   return <AppShell><Routes>
     <Route path="/" element={<Navigate to={postAuthDestination(session, '')} replace />} />
+    <Route path="/track-order" element={<PublicOrderLookupPage />} />
     <Route path="/customer/orders" element={<RoleGuard roles={['CUSTOMER']}><CustomerOrdersPage /></RoleGuard>} />
+    <Route path="/customer/orders/:orderId" element={<RoleGuard roles={['CUSTOMER']}><CustomerOrderDetailPage /></RoleGuard>} />
     <Route path="/customer/invitations" element={<RoleGuard roles={['CUSTOMER']}><CustomerInvitationsPage /></RoleGuard>} />
     <Route path="/register-shop" element={<RoleGuard roles={['CUSTOMER']}><ShopRegistrationPage /></RoleGuard>} />
     <Route path="/owner" element={<RoleGuard roles={['OWNER']}><><OwnerDashboard /><OwnerStaffPresenceCard /></></RoleGuard>} />

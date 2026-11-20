@@ -34,6 +34,13 @@ public class ShopOrderController {
         return orders.get(principal, orderId);
     }
 
+    @GetMapping("/customer-match")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.CustomerMatch findCustomer(@RequestParam String email,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.findCustomerForOrder(principal, email);
+    }
+
     @PostMapping
     @PreAuthorize("hasRole('STAFF')")
     public ShopOrderService.OrderSummary create(@Valid @RequestBody ShopOrderService.CreateOrderRequest request,
@@ -54,6 +61,27 @@ public class ShopOrderController {
     public ShopOrderService.OrderSummary recordCashPayment(@PathVariable String orderId,
             @AuthenticationPrincipal FirebasePrincipal principal) {
         return orders.recordCashPayment(principal, orderId);
+    }
+
+    @PostMapping("/{orderId}/payments/paymongo-link")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.PaymentLinkResult createPayMongoLink(@PathVariable String orderId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.createPaymentLink(principal, orderId);
+    }
+
+    @PostMapping("/{orderId}/payments/confirm-online")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.OrderSummary confirmOnlinePayment(@PathVariable String orderId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.confirmOnlinePayment(principal, orderId);
+    }
+
+    @PostMapping("/{orderId}/payments/cancel-link")
+    @PreAuthorize("hasRole('STAFF')")
+    public ShopOrderService.OrderSummary cancelPaymentLink(@PathVariable String orderId,
+            @AuthenticationPrincipal FirebasePrincipal principal) {
+        return orders.cancelPaymentLink(principal, orderId);
     }
 
     @PostMapping("/{orderId}/advance")

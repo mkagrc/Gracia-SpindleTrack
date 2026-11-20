@@ -29,6 +29,17 @@ public class UserAccountRepository {
     public Optional<UserAccount> findByFirebaseUid(String uid) { return findByLookup("uid", uid); }
     public Optional<UserAccount> findByEmail(String email) { return findByLookup("email", normalizeEmail(email)); }
 
+    public Optional<UserAccount> findVerifiedCustomerByEmail(String email) {
+        String normalized = normalizeEmail(email);
+        if (normalized.isBlank()) return Optional.empty();
+        UserAccount account = findByEmail(normalized).orElse(null);
+        if (account == null || !account.active() || !"CUSTOMER".equals(account.role())) return Optional.empty();
+        DocumentSnapshot user = FirestoreSupport.await(firebase.firestore().collection(USERS).document(account.id()).get());
+        if (!user.exists() || !Boolean.TRUE.equals(user.getBoolean("emailVerified"))
+                || !normalized.equals(user.getString("normalizedEmail"))) return Optional.empty();
+        return Optional.of(account);
+    }
+
     public Optional<String> findShopName(String shopId) {
         if (shopId == null) return Optional.empty();
         DocumentSnapshot shop = FirestoreSupport.await(firebase.firestore().collection(SHOPS).document(shopId).get());
@@ -54,6 +65,7 @@ public class UserAccountRepository {
             data.put("normalizedEmail", normalized);
             data.put("displayName", displayName);
             data.put("role", role);
+            data.put("emailVerified", true);
             data.put("active", true);
             data.put("shopId", null);
             data.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
@@ -187,6 +199,7 @@ public class UserAccountRepository {
         update.put("displayName", displayName);
         update.put("email", email == null ? "" : email.trim());
         update.put("normalizedEmail", normalizeEmail(email));
+        update.put("emailVerified", true);
         update.put("lastLoginAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
         return update;
     }

@@ -190,6 +190,53 @@ class ShopOrderPricingServiceTest {
                 () -> service.changePrice(f.owner(), "order-A", new ShopOrderService.PriceChangeRequest(new BigDecimal("12.00")))).getStatusCode());
     }
 
+    @Test
+    void pendingPaymentLinkAlsoLocksPriceUntilCancelled() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING"); f.transactionHarness();
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase).changePrice(f.staff(), "order-A", new ShopOrderService.PriceChangeRequest(new BigDecimal("90.00"))));
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+    }
+
+    @Test
+    void onlineLinkStoresPendingAmountAndOrderReferenceAndConfirmsOnlyMatchingPayment() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        when(gateway.createPaymentLink(12345L, "order-A", "O-000001")).thenReturn(new PayMongoGateway.CreatedLink("link-abc", "https://pm.link/test", 12345L, "PHP", "ref-1"));
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+        ShopOrderService.PaymentLinkResult created = service.createPaymentLink(f.staff(), "order-A");
+        assertEquals("PENDING", created.order().paymentStatus());
+        assertEquals("https://pm.link/test", created.paymentLinkUrl());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PENDING".equals(values.get("paymentStatus")) && "ONLINE".equals(values.get("paymentMethod")) && Long.valueOf(12345L).equals(values.get("paymentAmountCentavos")) && "order-A".equals(values.get("paymentOrderIdReference"))));
+        verify(f.tx).create(eq(f.paymentRecord), argThat(values -> "shop-A".equals(values.get("shopId")) && "order-A".equals(values.get("orderId")) && "PENDING".equals(values.get("status"))));
+
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        when(f.orderSnapshot.getString("paymentRecordId")).thenReturn("payment-doc-A");
+        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+        ShopOrderService.OrderSummary paid = service.confirmOnlinePayment(f.staff(), "order-A");
+        assertEquals("PAID", paid.paymentStatus()); assertEquals("ONLINE", paid.paymentMethod());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus")) && "ONLINE".equals(values.get("paymentMethod"))));
+    }
+
+    @Test
+    void onlineConfirmationRejectsWrongAmountOrOrderReference() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L); f.transactionHarness();
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12344L, "other-order"));
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> new ShopOrderService(f.firebase, gateway).confirmOnlinePayment(f.staff(), "order-A"));
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+    }
+
     private static final class Fixture {
         final FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
         final Firestore db = mock(Firestore.class);
@@ -197,6 +244,7 @@ class ShopOrderPricingServiceTest {
         final CollectionReference services = mock(CollectionReference.class);
         final CollectionReference counters = mock(CollectionReference.class);
         final CollectionReference orders = mock(CollectionReference.class);
+        final CollectionReference payments = mock(CollectionReference.class);
         final CollectionReference stageHistoryCollection = mock(CollectionReference.class);
         final CollectionReference priceLogCollection = mock(CollectionReference.class);
         final DocumentReference shop = mock(DocumentReference.class);
@@ -205,6 +253,7 @@ class ShopOrderPricingServiceTest {
         final DocumentReference order = mock(DocumentReference.class);
         final DocumentReference stageHistory = mock(DocumentReference.class);
         final DocumentReference priceLog = mock(DocumentReference.class);
+        final DocumentReference paymentRecord = mock(DocumentReference.class);
         final DocumentSnapshot shopSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot serviceSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot counterSnapshot = mock(DocumentSnapshot.class);
@@ -217,12 +266,16 @@ class ShopOrderPricingServiceTest {
             when(db.collection("services")).thenReturn(services);
             when(db.collection("orderCounters")).thenReturn(counters);
             when(db.collection("orders")).thenReturn(orders);
+            when(db.collection("payments")).thenReturn(payments);
             when(db.collection("orderStageHistory")).thenReturn(stageHistoryCollection);
             when(shops.document("shop-A")).thenReturn(shop);
             when(services.document("service-A")).thenReturn(service);
             when(counters.document("shop-A")).thenReturn(counter);
             when(orders.document()).thenReturn(order);
             when(orders.document("order-A")).thenReturn(order);
+            when(payments.document()).thenReturn(paymentRecord);
+            when(paymentRecord.getId()).thenReturn("payment-doc-A");
+            when(payments.document("payment-doc-A")).thenReturn(paymentRecord);
             when(order.getId()).thenReturn("order-A");
             when(stageHistoryCollection.document()).thenReturn(stageHistory);
             when(order.collection("priceLog")).thenReturn(priceLogCollection);
@@ -250,6 +303,7 @@ class ShopOrderPricingServiceTest {
             when(orderSnapshot.getString("createdBy")).thenReturn("staff-user");
             when(orderSnapshot.get("kilos")).thenReturn(new BigDecimal("2.35"));
             when(orderSnapshot.get("totalPrice")).thenReturn(new BigDecimal("123.45"));
+            when(order.get()).thenReturn(ApiFutures.immediateFuture(orderSnapshot));
         }
 
         @SuppressWarnings("unchecked")
