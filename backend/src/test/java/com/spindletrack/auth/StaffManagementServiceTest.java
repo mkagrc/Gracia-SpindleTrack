@@ -85,15 +85,27 @@ class StaffManagementServiceTest {
         Query emailQuery = mock(Query.class);
         QuerySnapshot rows = mock(QuerySnapshot.class);
         QueryDocumentSnapshot matching = mock(QueryDocumentSnapshot.class);
+        QueryDocumentSnapshot declined = mock(QueryDocumentSnapshot.class);
+        QueryDocumentSnapshot expired = mock(QueryDocumentSnapshot.class);
+        QueryDocumentSnapshot wrongEmail = mock(QueryDocumentSnapshot.class);
         Timestamp expiry = Timestamp.of(Date.from(Instant.now().plusSeconds(3600)));
         when(f.invitationCollection.whereEqualTo("normalizedEmail", "staff@example.com")).thenReturn(emailQuery);
         when(emailQuery.get()).thenReturn(ApiFutures.immediateFuture(rows));
-        when(rows.getDocuments()).thenReturn(List.of(matching));
+        when(rows.getDocuments()).thenReturn(List.of(matching, declined, expired, wrongEmail));
         when(matching.getId()).thenReturn("invite-string-A");
+        when(matching.getString("normalizedEmail")).thenReturn("staff@example.com");
         when(matching.getString("status")).thenReturn("PENDING");
         when(matching.getString("shopId")).thenReturn("shop-string-A");
         when(matching.get("createdAt")).thenReturn(Timestamp.of(Date.from(Instant.now().minusSeconds(60))));
         when(matching.get("expiresAt")).thenReturn(expiry);
+        when(declined.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(declined.getString("status")).thenReturn("DECLINED");
+        when(expired.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(expired.getString("status")).thenReturn("PENDING");
+        when(expired.get("expiresAt")).thenReturn(Timestamp.of(Date.from(Instant.now().minusSeconds(10))));
+        when(wrongEmail.getString("normalizedEmail")).thenReturn("other@example.com");
+        when(wrongEmail.getString("status")).thenReturn("PENDING");
+        when(wrongEmail.get("expiresAt")).thenReturn(expiry);
         when(f.shopRef.get()).thenReturn(ApiFutures.immediateFuture(f.shopSnapshot));
         when(f.shopSnapshot.exists()).thenReturn(true);
         when(f.shopSnapshot.getString("name")).thenReturn("Active Laundry");
@@ -101,10 +113,45 @@ class StaffManagementServiceTest {
         List<StaffManagementService.InboxInvitation> inbox = service(f).invitationsForUser(principal("STAFF@EXAMPLE.COM", "CUSTOMER"));
 
         assertEquals(1, inbox.size());
-        assertEquals("invite-string-A", inbox.get(0).id());
+        assertEquals("invite-string-A", inbox.get(0).invitationId());
         assertEquals("Active Laundry", inbox.get(0).shopName());
         assertEquals(expiry.toDate().toInstant(), inbox.get(0).expiresAt());
         verify(f.invitationCollection).whereEqualTo("normalizedEmail", "staff@example.com");
+    }
+
+    @Test
+    void inboxInvitationIdCanBePassedToAcceptById() throws Exception {
+        Fixture f = acceptanceFixture("PENDING", "staff@example.com", "CUSTOMER", null,
+                Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        Query inboxQuery = mock(Query.class);
+        QuerySnapshot rows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot invitation = mock(QueryDocumentSnapshot.class);
+        when(f.invitationCollection.whereEqualTo("normalizedEmail", "staff@example.com")).thenReturn(inboxQuery);
+        when(inboxQuery.get()).thenReturn(ApiFutures.immediateFuture(rows));
+        when(rows.getDocuments()).thenReturn(List.of(invitation));
+        when(invitation.getId()).thenReturn("invite-string-A");
+        when(invitation.exists()).thenReturn(true);
+        when(invitation.getReference()).thenReturn(f.invitationRef);
+        when(invitation.getString("status")).thenReturn("PENDING", "PENDING");
+        when(invitation.getString("normalizedEmail")).thenReturn("staff@example.com");
+        when(invitation.getString("shopId")).thenReturn("shop-string-A");
+        when(invitation.get("createdAt")).thenReturn(Timestamp.of(Date.from(Instant.now().minusSeconds(30))));
+        when(invitation.get("expiresAt")).thenReturn(Timestamp.of(Date.from(Instant.now().plusSeconds(3600))));
+        when(f.shopRef.get()).thenReturn(ApiFutures.immediateFuture(f.shopSnapshot));
+        when(f.shopSnapshot.exists()).thenReturn(true);
+        when(f.shopSnapshot.getString("name")).thenReturn("Active Laundry");
+        when(f.invitationCollection.document("invite-string-A")).thenReturn(f.invitationRef);
+        when(f.transaction.get(f.invitationRef)).thenReturn(ApiFutures.immediateFuture(invitation));
+        StaffManagementService service = service(f);
+
+        List<StaffManagementService.InboxInvitation> inbox = service.invitationsForUser(principal("staff@example.com", "CUSTOMER"));
+        StaffManagementService.AcceptResult accepted = service.acceptById(inbox.get(0).invitationId(), principal("staff@example.com", "CUSTOMER"));
+
+        assertEquals("invite-string-A", inbox.get(0).invitationId());
+        assertEquals("STAFF", accepted.role());
+        assertEquals("shop-string-A", accepted.shopId());
+        verify(f.invitationCollection).document("invite-string-A");
+        verify(f.firebase).setSessionClaims("firebase-uid-1", "STAFF", "shop-string-A");
     }
 
     @Test
@@ -124,6 +171,13 @@ class StaffManagementServiceTest {
         Fixture unverifiedFixture = fixture();
         assertEquals(List.of(), service(unverifiedFixture).invitationsForUser(unverified));
         verify(unverifiedFixture.firebase, never()).firestore();
+
+        for (String role : List.of("STAFF", "OWNER", "PLATFORM_ADMIN")) {
+            Fixture roleFixture = fixture();
+            FirebasePrincipal nonCustomer = principal("staff@example.com", role);
+            assertEquals(List.of(), service(roleFixture).invitationsForUser(nonCustomer));
+            verify(roleFixture.firebase, never()).firestore();
+        }
     }
 
     @Test

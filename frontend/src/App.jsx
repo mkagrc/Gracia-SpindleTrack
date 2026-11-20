@@ -15,6 +15,7 @@ import Toast from './Toast.jsx';
 import { AcceptInvitationPage, CustomerInvitationsPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
 import { NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
 import { getInvitationReturn, postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
+import { customerMenuForInvitations, dismissInvitationPrompt, undismissedInvitations } from './invitationInbox.js';
 
 const ROLE_HOME = { PLATFORM_ADMIN: '/admin/shops', OWNER: '/owner', STAFF: '/staff', CUSTOMER: '/customer/orders' };
 const ROLE_LABEL = { PLATFORM_ADMIN: 'Platform Admin', OWNER: 'Owner', STAFF: 'Staff', CUSTOMER: 'Customer' };
@@ -93,36 +94,80 @@ function Brand({ compact = false }) {
   return <Link to="/" className={`inline-flex items-center gap-3 rounded-xl text-ink focus:outline-none focus:ring-4 focus:ring-teal-100 ${compact ? '' : 'px-1'}`} aria-label="SpindleTrack home"><span className="grid h-10 w-10 place-items-center rounded-2xl bg-brand text-white shadow-sm"><Droplets size={22} aria-hidden="true" /></span><span><span className="block text-base font-bold tracking-tight">SpindleTrack</span>{!compact && <span className="block text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">Laundry operations</span>}</span></Link>;
 }
 function AppShell({ children }) {
-  const { session, signOut } = useAuth();
+  const { session, signOut, firebaseUser, syncSession } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [pendingInvitations, setPendingInvitations] = useState(0);
-  const [inviteRefresh, setInviteRefresh] = useState(0);
+  const [pendingInvitations, setPendingInvitations] = useState([]);
+  const [confirmDecline, setConfirmDecline] = useState(null);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteToast, setInviteToast] = useState(null);
+  const [promptDismissals, setPromptDismissals] = useState(0);
   const role = session?.role || 'CUSTOMER';
-  const menu = MENU[role] || [];
+  const menu = role === 'CUSTOMER' ? customerMenuForInvitations(MENU.CUSTOMER, pendingInvitations) : MENU[role] || [];
+  const currentPrompt = useMemo(() => role === 'CUSTOMER' ? undismissedInvitations(pendingInvitations)[0] : null,
+    [role, pendingInvitations, promptDismissals]);
   useEffect(() => setMobileOpen(false), [location.pathname]);
   useEffect(() => {
-    if (role !== 'CUSTOMER') { setPendingInvitations(0); return undefined; }
+    if (role !== 'CUSTOMER' || !firebaseUser?.emailVerified) { setPendingInvitations([]); return undefined; }
     let active = true;
-    api.get('/api/me/invitations').then(({ data }) => { if (active) setPendingInvitations(Array.isArray(data) ? data.length : 0); })
-      .catch(() => { if (active) setPendingInvitations(0); });
-    return () => { active = false; };
-  }, [role, session?.email, location.pathname, inviteRefresh]);
-  useEffect(() => {
-    const refresh = () => setInviteRefresh((value) => value + 1);
-    window.addEventListener('spindletrack:invitations-changed', refresh);
-    return () => window.removeEventListener('spindletrack:invitations-changed', refresh);
-  }, []);
+    const refresh = () => api.get('/api/me/invitations')
+      .then(({ data }) => { if (active) setPendingInvitations(Array.isArray(data) ? data : []); })
+      .catch(() => { if (active) setPendingInvitations([]); });
+    const refreshOnFocus = () => { void refresh(); };
+    const refreshAfterAction = () => { void refresh(); };
+    void refresh();
+    window.addEventListener('focus', refreshOnFocus);
+    window.addEventListener('spindletrack:invitations-changed', refreshAfterAction);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refreshOnFocus);
+      window.removeEventListener('spindletrack:invitations-changed', refreshAfterAction);
+    };
+  }, [role, session?.email, firebaseUser]);
   const leave = async () => { await signOut(); navigate('/sign-in', { replace: true }); };
+  const dismissPrompt = (invitation) => {
+    dismissInvitationPrompt(invitation.invitationId);
+    setPromptDismissals((value) => value + 1);
+  };
+  const acceptPrompt = async (invitation) => {
+    setInviteBusy(true);
+    try {
+      const { data } = await api.post(`/api/me/invitations/${encodeURIComponent(invitation.invitationId)}/accept`);
+      await firebaseUser.getIdToken(true);
+      await syncSession(firebaseUser);
+      setPendingInvitations([]);
+      window.dispatchEvent(new Event('spindletrack:invitations-changed'));
+      navigate('/staff', { replace: true, state: { toast: `Welcome to ${data?.shopName || invitation.shopName} as staff.` } });
+    } catch (reason) {
+      setInviteToast({ type: 'error', message: apiErrorMessage(reason, 'The invitation could not be accepted.') });
+    } finally { setInviteBusy(false); }
+  };
+  const declinePrompt = async () => {
+    const invitation = confirmDecline;
+    if (!invitation) return;
+    setInviteBusy(true);
+    try {
+      await api.post(`/api/me/invitations/${encodeURIComponent(invitation.invitationId)}/decline`);
+      setPendingInvitations((current) => current.filter((row) => row.invitationId !== invitation.invitationId));
+      dismissPrompt(invitation);
+      setConfirmDecline(null);
+      setInviteToast({ type: 'success', message: `Invitation to ${invitation.shopName} declined.` });
+      window.dispatchEvent(new Event('spindletrack:invitations-changed'));
+    } catch (reason) {
+      setInviteToast({ type: 'error', message: apiErrorMessage(reason, 'The invitation could not be declined.') });
+      throw new Error(apiErrorMessage(reason, 'The invitation could not be declined.'));
+    } finally { setInviteBusy(false); }
+  };
   const shopLabel = session?.shop?.name || (role === 'PLATFORM_ADMIN' ? 'Platform workspace' : 'Shop workspace');
   return <div className="min-h-screen bg-canvas text-ink">
+    <Toast type={inviteToast?.type} message={inviteToast?.message} onDismiss={() => setInviteToast(null)} />
     {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-30 bg-slate-950/40 lg:hidden" onClick={() => setMobileOpen(false)} />}
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[268px] flex-col border-r border-slate-200 bg-white px-4 py-5 transition-transform lg:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
       <div className="px-2"><Brand /></div>
       <div className="mt-8 rounded-2xl bg-slate-50 p-3"><div className="flex items-center gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-brand shadow-sm"><UserRound size={19} /></span><div className="min-w-0"><p className="truncate text-sm font-semibold text-ink">{session?.fullName || 'Signed-in user'}</p><p className="truncate text-xs text-slate-500">{humanRole(role)}</p></div></div><p className="mt-3 truncate border-t border-slate-200 pt-3 text-xs text-slate-500">{shopLabel}</p></div>
       <p className="mb-2 mt-8 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">Workspace</p>
-      <nav aria-label="Main navigation" className="space-y-1">{menu.map((item) => { const Icon = item.icon; return <NavLink key={item.to} to={item.to} end={item.to === '/owner' || item.to === '/staff'} className={({ isActive }) => `flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition ${isActive ? 'bg-teal-50 text-teal-800' : 'text-slate-600 hover:bg-slate-50 hover:text-ink'}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.invitationBadge && pendingInvitations > 0 && <span aria-label={`${pendingInvitations} pending invitations`} className="grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1.5 text-[10px] font-bold text-white">{pendingInvitations > 9 ? '9+' : pendingInvitations}</span>}{item.soon && <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">Soon</span>}</NavLink>; })}</nav>
+      <nav aria-label="Main navigation" className="space-y-1">{menu.map((item) => { const Icon = item.icon; return <NavLink key={item.to} to={item.to} end={item.to === '/owner' || item.to === '/staff'} className={({ isActive }) => `flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition ${isActive ? 'bg-teal-50 text-teal-800' : 'text-slate-600 hover:bg-slate-50 hover:text-ink'}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.invitationBadge && pendingInvitations.length > 0 && <span aria-label={`${pendingInvitations.length} pending invitations`} className="grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1.5 text-[10px] font-bold text-white">{pendingInvitations.length > 9 ? '9+' : pendingInvitations.length}</span>}{item.soon && <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">Soon</span>}</NavLink>; })}</nav>
       <div className="mt-auto rounded-2xl border border-teal-100 bg-teal-50/70 p-3 text-xs leading-5 text-teal-900"><div className="flex items-center gap-2 font-semibold"><ShieldCheck size={16} />Private by design</div><p className="mt-1 text-teal-800/80">Your access is limited to the role and shop assigned to your account.</p></div>
       <button type="button" onClick={leave} className="mt-3 flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold text-slate-600 transition hover:bg-red-50 hover:text-red-700"><LogOut size={18} />Sign out</button>
     </aside>
@@ -131,6 +176,8 @@ function AppShell({ children }) {
       <main className="mx-auto w-full max-w-[1440px] px-4 py-7 sm:px-7 sm:py-9">{children}</main>
       <footer className="border-t border-slate-200 bg-white px-5 py-4 text-xs text-slate-400 sm:px-7">SpindleTrack · Multi-shop laundry workspace</footer>
     </div>
+    {currentPrompt && <div role="dialog" aria-modal="true" aria-labelledby="invitation-prompt-title" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4"><section className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">Staff invitation</p><h2 id="invitation-prompt-title" className="mt-2 text-xl font-semibold text-ink">{currentPrompt.shopName} invited you to join as staff</h2><p className="mt-2 text-sm leading-6 text-slate-600">Accept to join this shop, or decline to remove this invitation from your pending inbox.</p><div className="mt-5 flex flex-wrap gap-2"><button type="button" disabled={inviteBusy} onClick={() => acceptPrompt(currentPrompt)} className="min-h-10 rounded-xl bg-brand px-4 text-sm font-semibold text-white disabled:opacity-50">{inviteBusy ? 'Please wait…' : 'Accept'}</button><button type="button" disabled={inviteBusy} onClick={() => setConfirmDecline(currentPrompt)} className="min-h-10 rounded-xl border border-rose-200 px-4 text-sm font-semibold text-rose-700 disabled:opacity-50">Decline</button><button type="button" disabled={inviteBusy} onClick={() => dismissPrompt(currentPrompt)} className="min-h-10 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-600 disabled:opacity-50">Not now</button></div></section></div>}
+    {confirmDecline && <ConfirmDialog title="Decline shop invitation?" message={`Decline the invitation to “${confirmDecline.shopName}”? It will be removed from your pending inbox.`} confirmLabel="Decline invitation" cancelLabel="Cancel" tone="danger" loading={inviteBusy} onConfirm={declinePrompt} onCancel={() => setConfirmDecline(null)} formatError={apiErrorMessage} />}
   </div>;
 }
 

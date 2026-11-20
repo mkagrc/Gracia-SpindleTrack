@@ -41,7 +41,7 @@ public class StaffManagementService {
     public record InviteRequest(@NotBlank(message = "An email address is required.") @Email(message = "Enter a valid email address.") String email) {}
     public record AcceptRequest(@NotBlank(message = "Invitation token is required.") String token) {}
     public record InvitationSummary(String id, String email, String status, Instant expiresAt, Instant createdAt) {}
-    public record InboxInvitation(String id, String shopName, Instant invitedAt, Instant expiresAt) {}
+    public record InboxInvitation(String invitationId, String shopName, Instant invitedAt, Instant expiresAt) {}
     public record InvitationActionResult(String invitationId, String status) {}
     public record InvitationLink(InvitationSummary invitation, String inviteLink) {}
     public record StaffMember(String id, String firebaseUid, String name, String email, boolean active, boolean online, Long lastSeen) {}
@@ -91,13 +91,15 @@ public class StaffManagementService {
     }
 
     public List<InboxInvitation> invitationsForUser(FirebasePrincipal principal) {
-        if (principal == null || !principal.emailVerified() || principal.email() == null || principal.email().isBlank()) return List.of();
+        if (principal == null || !principal.emailVerified() || !"CUSTOMER".equals(principal.role())
+                || principal.email() == null || principal.email().isBlank()) return List.of();
         String normalizedEmail = normalizeEmail(principal.email());
         Firestore db = firebase.firestore();
         QuerySnapshot results = FirestoreSupport.await(db.collection(INVITATIONS).whereEqualTo("normalizedEmail", normalizedEmail).get());
         Instant now = Instant.now();
         List<InboxInvitation> pending = new ArrayList<>();
         for (DocumentSnapshot invitation : results.getDocuments()) {
+            if (!normalizedEmail.equals(normalizeEmail(invitation.getString("normalizedEmail")))) continue;
             if (!"PENDING".equals(invitation.getString("status"))) continue;
             Instant expiresAt = instant(invitation.get("expiresAt"));
             if (StaffInvitationToken.expired(expiresAt, now)) continue;
@@ -109,7 +111,7 @@ public class StaffManagementService {
                     instant(invitation.get("createdAt")), expiresAt));
         }
         pending.sort(Comparator.comparing(InboxInvitation::invitedAt, Comparator.nullsLast(Comparator.reverseOrder()))
-                .thenComparing(InboxInvitation::id));
+                .thenComparing(InboxInvitation::invitationId));
         return List.copyOf(pending);
     }
 

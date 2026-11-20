@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, Clipboard, LoaderCircle, Mail, Plus, RefreshCw, Save, Users, Wrench } from 'lucide-react';
 import { reload as reloadFirebaseUser, sendEmailVerification } from 'firebase/auth';
 import api, { apiErrorMessage } from './api.js';
@@ -7,6 +7,7 @@ import { useAuth } from './AuthContext.jsx';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
 import { rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
+import { shouldRedirectEmptyInbox } from './invitationInbox.js';
 
 function Heading({ eyebrow, title, description, action }) {
   return <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">{eyebrow}</p><h1 className="mt-2 text-2xl font-semibold tracking-tight text-ink sm:text-3xl">{title}</h1>{description && <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p>}</div>{action}</div>;
@@ -333,6 +334,8 @@ export function CustomerInvitationsPage() {
       throw new Error(message);
     } finally { setBusy(false); }
   };
+
+  if (shouldRedirectEmptyInbox({ loading, error, invitations })) return <Navigate to="/customer/orders" replace />;
 
   return <>
     <Toast type={toast?.type} message={toast?.message} onDismiss={() => setToast(null)} />
