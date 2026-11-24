@@ -5,6 +5,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +13,7 @@ import java.util.Map;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -24,8 +26,9 @@ public class PayMongoHttpGateway implements PayMongoGateway {
     private final HttpClient client;
     private final ObjectMapper mapper;
 
+    @Autowired
     public PayMongoHttpGateway(@Value("${paymongo.secret-key:}") String secretKey) {
-        this(secretKey, HttpClient.newHttpClient(), new ObjectMapper());
+        this(secretKey, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build(), new ObjectMapper());
     }
 
     PayMongoHttpGateway(String secretKey, HttpClient client, ObjectMapper mapper) {
@@ -87,6 +90,7 @@ public class PayMongoHttpGateway implements PayMongoGateway {
     private Map<String, Object> call(String method, String path, Object body) {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(BASE + path))
+                    .timeout(Duration.ofSeconds(10))
                     .header("Authorization", "Basic " + Base64.getEncoder().encodeToString((secretKey + ":").getBytes(StandardCharsets.UTF_8)))
                     .header("Content-Type", "application/json");
             if ("GET".equals(method)) request.GET();

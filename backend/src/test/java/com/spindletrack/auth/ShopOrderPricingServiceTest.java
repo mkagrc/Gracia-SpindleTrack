@@ -38,17 +38,18 @@ class ShopOrderPricingServiceTest {
         assertEquals(new BigDecimal("2.35"), created.kilos());
         assertEquals(new BigDecimal("123.45"), created.totalPrice());
         assertEquals("Wash", created.serviceName());
+        assertEquals("kg", created.unit());
         assertEquals("UNPAID", created.paymentStatus());
         assertEquals(null, created.paymentMethod());
         assertEquals(null, created.paidAt());
         assertEquals(null, created.paidByUid());
         assertEquals(null, created.paidByName());
-        verify(f.tx).create(eq(f.order), argThat(values -> values.get("totalPrice").equals(new BigDecimal("123.45"))
+        verify(f.tx).create(eq(f.order), argThat(values -> Long.valueOf(12345L).equals(values.get("totalPriceCentavos"))
                 && "UNPAID".equals(values.get("paymentStatus")) && values.get("paymentMethod") == null
                 && values.get("paidAt") == null && values.get("paidByUid") == null && values.get("paidByName") == null
                 && !values.containsKey("items") && !values.containsKey("total")));
         verify(f.tx).create(eq(f.priceLog), argThat(values -> values.get("previousPrice") == null
-                && values.get("newPrice").equals(new BigDecimal("123.45"))
+                && Long.valueOf(12345L).equals(values.get("newPrice")) && "CENTAVOS".equals(values.get("priceUnit"))
                 && "staff-uid".equals(values.get("changedByUid")) && "Staff Display".equals(values.get("changedByName"))));
         verify(f.tx).create(eq(f.stageHistory), argThat(values -> "staff-user".equals(values.get("changedBy"))
                 && "Staff Display".equals(values.get("changedByName"))));
@@ -65,9 +66,9 @@ class ShopOrderPricingServiceTest {
 
         assertEquals(new BigDecimal("88.20"), result.totalPrice());
         assertEquals("UNPAID", result.paymentStatus());
-        verify(f.tx).update(eq(f.order), argThat(values -> new BigDecimal("88.20").equals(values.get("totalPrice"))));
-        verify(f.tx).create(eq(f.priceLog), argThat(values -> new BigDecimal("123.45").equals(values.get("previousPrice"))
-                && new BigDecimal("88.20").equals(values.get("newPrice"))
+        verify(f.tx).update(eq(f.order), argThat(values -> Long.valueOf(8820L).equals(values.get("totalPriceCentavos"))));
+        verify(f.tx).create(eq(f.priceLog), argThat(values -> Long.valueOf(12345L).equals(values.get("previousPrice"))
+                && Long.valueOf(8820L).equals(values.get("newPrice")) && "CENTAVOS".equals(values.get("priceUnit"))
                 && "staff-uid".equals(values.get("changedByUid")) && "Staff Display".equals(values.get("changedByName"))));
     }
 
@@ -191,6 +192,19 @@ class ShopOrderPricingServiceTest {
     }
 
     @Test
+    void serviceWithMissingUnitReturnsConflictInsteadOfThrowingNullPointerException() throws Exception {
+        Fixture f = new Fixture();
+        when(f.serviceSnapshot.getString("unit")).thenReturn(null);
+        f.transactionHarness();
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase).create(f.staff(), new ShopOrderService.CreateOrderRequest(
+                        "Customer", "639171234567", "service-A", new BigDecimal("2.00"), new BigDecimal("50.00"), "")));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+    }
+
+    @Test
     void pendingPaymentLinkAlsoLocksPriceUntilCancelled() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
         when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING"); f.transactionHarness();
@@ -235,6 +249,65 @@ class ShopOrderPricingServiceTest {
         ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> new ShopOrderService(f.firebase, gateway).confirmOnlinePayment(f.staff(), "order-A"));
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
         verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+    }
+
+    @Test
+    void duplicateOnlineConfirmationIsIdempotent() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING", "PENDING", "PENDING", "PENDING", "PAID");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+
+        assertEquals("PAID", service.confirmOnlinePayment(f.staff(), "order-A").paymentStatus());
+        assertEquals("PAID", service.confirmOnlinePayment(f.staff(), "order-A").paymentStatus());
+        verify(gateway, times(1)).findPaidPayment("link-abc");
+        verify(f.tx, times(1)).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))));
+    }
+
+    @Test
+    void cashSettlementLosesSafelyWhenProviderPaymentCompletesDuringLinkArchive() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        when(gateway.findPaidPayment("link-abc")).thenReturn(null,
+                new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).recordCashPayment(f.staff(), "order-A"));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(gateway).archivePaymentLink("link-abc");
+        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
+                && "ONLINE".equals(values.get("paymentMethod"))));
+        verify(f.tx, never()).create(eq(f.paymentRecord), argThat(values -> "CASH".equals(values.get("method"))));
+    }
+
+    @Test
+    void cancelLosesSafelyWhenProviderPaymentCompletesDuringArchive() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        when(gateway.findPaidPayment("link-abc")).thenReturn(null,
+                new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).cancelPaymentLink(f.staff(), "order-A"));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
+                && "ONLINE".equals(values.get("paymentMethod"))));
+        verify(f.tx, never()).update(eq(f.order), argThat(values -> "UNPAID".equals(values.get("paymentStatus"))));
     }
 
     private static final class Fixture {
@@ -287,6 +360,7 @@ class ShopOrderPricingServiceTest {
             when(serviceSnapshot.getId()).thenReturn("service-A");
             when(serviceSnapshot.getString("shopId")).thenReturn("shop-A");
             when(serviceSnapshot.getString("name")).thenReturn("Wash");
+            when(serviceSnapshot.getString("unit")).thenReturn("kg");
             when(serviceSnapshot.getBoolean("active")).thenReturn(true);
         }
 

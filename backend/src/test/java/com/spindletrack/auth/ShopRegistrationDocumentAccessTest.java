@@ -35,9 +35,10 @@ class ShopRegistrationDocumentAccessTest {
 
     @Test
     void uploadingOwnerCanOpenTheirDocument() throws Exception {
+        when(users.findByFirebaseUid("firebase-owner")).thenReturn(Optional.of(owner("shop-7", "PENDING")));
         byte[] content = "%PDF-1.7".getBytes();
         when(storage.open("7a3e1f68-1348-42ae-b2b9-6029d4e6cd8f.pdf")).thenReturn(new ByteArrayInputStream(content));
-        ShopDocumentDownload result = registrations.openDocument("doc-a", "user-41", "OWNER");
+        ShopDocumentDownload result = registrations.openDocument("doc-a", "firebase-owner", "OWNER");
         assertArrayEquals(content, result.content().readAllBytes());
     }
 
@@ -50,8 +51,16 @@ class ShopRegistrationDocumentAccessTest {
 
     @Test
     void differentOwnerAndStaffCannotOpenDocument() {
-        assertThrows(ResponseStatusException.class, () -> registrations.openDocument("doc-a", "user-42", "OWNER"));
+        when(users.findByFirebaseUid("firebase-other")).thenReturn(Optional.of(owner("shop-other", "ACTIVE")));
+        assertThrows(ResponseStatusException.class, () -> registrations.openDocument("doc-a", "firebase-other", "OWNER"));
         assertThrows(ResponseStatusException.class, () -> registrations.openDocument("doc-a", "user-41", "STAFF"));
+    }
+
+    @Test
+    void ownerWhoUploadedDocumentStillCannotOpenItAfterShopMismatch() {
+        when(users.findByFirebaseUid("firebase-owner")).thenReturn(Optional.of(owner("shop-other", "ACTIVE")));
+        assertThrows(ResponseStatusException.class,
+                () -> registrations.openDocument("doc-a", "firebase-owner", "OWNER"));
     }
 
     @Test

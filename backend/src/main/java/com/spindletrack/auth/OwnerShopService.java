@@ -1,10 +1,15 @@
 package com.spindletrack.auth;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -14,10 +19,19 @@ public class OwnerShopService {
     private final FirebaseAdminTokenVerifier firebase;
     public OwnerShopService(FirebaseAdminTokenVerifier firebase) { this.firebase = firebase; }
 
-    public record ShopProfile(String id, String name, String address, String contactNumber, String status) {}
-    public record UpdateRequest(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(max=160) String name,
-            @jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(max=500) String address,
-            @jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(min=7,max=32) String contactNumber) {}
+    public record ShopProfile(String id, String name, String address, String contactNumber, String status,
+            Double latitude, Double longitude) {}
+
+    public record UpdateRequest(
+            @NotBlank @Size(max = 160) String name,
+            @NotBlank @Size(max = 500) String address,
+            @NotBlank @Size(min = 7, max = 32) String contactNumber,
+            @DecimalMin(value = "-90.0", message = "Latitude must be between -90 and 90.")
+            @DecimalMax(value =  "90.0", message = "Latitude must be between -90 and 90.")
+            Double latitude,
+            @DecimalMin(value = "-180.0", message = "Longitude must be between -180 and 180.")
+            @DecimalMax(value =  "180.0", message = "Longitude must be between -180 and 180.")
+            Double longitude) {}
 
     public ShopProfile getMine(String shopId) {
         String id = requireShopId(shopId);
@@ -29,17 +43,43 @@ public class OwnerShopService {
 
     public ShopProfile updateMine(String shopId, UpdateRequest request) {
         String id = requireShopId(shopId);
+        validateCoordinates(request.latitude(), request.longitude());
         Firestore db = firebase.firestore();
         DocumentReference shopRef = db.collection("shops").document(id);
         FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shop = FirestoreSupport.await(tx.get(shopRef));
             if (!shop.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
             requireActive(shop.getString("status"));
-            tx.update(shopRef, Map.of("name", request.name().trim(), "address", request.address().trim(),
-                    "contactNumber", request.contactNumber().trim(), "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            Map<String, Object> fields = new HashMap<>();
+            fields.put("name", request.name().trim());
+            fields.put("address", request.address().trim());
+            fields.put("contactNumber", request.contactNumber().trim());
+            // null clears the coordinates; non-null sets them
+            fields.put("latitude",  request.latitude());
+            fields.put("longitude", request.longitude());
+            fields.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+            tx.update(shopRef, fields);
             return null;
         });
         return getMine(id);
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    static void validateCoordinates(Double lat, Double lng) {
+        // Both must be supplied together or both omitted.
+        if ((lat == null) != (lng == null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Latitude and longitude must both be provided or both omitted.");
+        }
+        if (lat != null && (lat < -90.0 || lat > 90.0)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Latitude must be between -90 and 90.");
+        }
+        if (lng != null && (lng < -180.0 || lng > 180.0)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Longitude must be between -180 and 180.");
+        }
     }
 
     private static String requireShopId(String shopId) {
@@ -50,8 +90,9 @@ public class OwnerShopService {
         if (!"ACTIVE".equals(status)) throw new ResponseStatusException(HttpStatus.FORBIDDEN,
                 "Shop profile editing is available only while the shop is ACTIVE.");
     }
-    private static ShopProfile profile(DocumentSnapshot shop) {
+    static ShopProfile profile(DocumentSnapshot shop) {
         return new ShopProfile(shop.getId(), shop.getString("name"), shop.getString("address"),
-                shop.getString("contactNumber"), shop.getString("status"));
+                shop.getString("contactNumber"), shop.getString("status"),
+                shop.getDouble("latitude"), shop.getDouble("longitude"));
     }
 }

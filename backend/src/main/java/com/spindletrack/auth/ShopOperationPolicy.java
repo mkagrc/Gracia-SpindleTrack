@@ -36,6 +36,8 @@ public final class ShopOperationPolicy {
             return true;
         }
         return "GET".equals(method) && path != null
-                && path.matches("/api/shops/documents/[^/]+");
+                && (path.matches("/api/shops/documents/[^/]+")
+                    || path.equals("/api/public/shops")
+                    || path.matches("/api/public/shops/[^/]+"));
     }
 }

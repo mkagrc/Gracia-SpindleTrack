@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 public class OrderNotificationDispatcher {
     private static final Logger log = LoggerFactory.getLogger(OrderNotificationDispatcher.class);
     private static final long LEASE_MILLIS = 120_000L;
+    private static final int MAX_ATTEMPTS = 10;
     private final FirebaseAdminTokenVerifier firebase;
     private final BrevoTransactionalEmailClient brevo;
 
@@ -31,6 +32,15 @@ public class OrderNotificationDispatcher {
     @Scheduled(fixedDelayString = "${spindletrack.notifications.poll-ms:60000}")
     public void dispatchDue() {
         if (!brevo.configured()) return;
+        String correlationId = UUID.randomUUID().toString();
+        try { dispatchDueBatch(); }
+        catch (RuntimeException exception) {
+            log.error("scheduled_job_failed job=email-outbox correlationId={} errorType={}",
+                    correlationId, exception.getClass().getSimpleName());
+        }
+    }
+
+    private void dispatchDueBatch() {
         Firestore db = firebase.firestore();
         long now = System.currentTimeMillis();
         QuerySnapshot pending = FirestoreSupport.await(db.collection("notificationOutbox").whereEqualTo("status", "PENDING")
@@ -70,8 +80,11 @@ public class OrderNotificationDispatcher {
             return true;
         });
         if (!claimed) return;
+        String correlationId = eventId;
         try {
             DocumentSnapshot row = FirestoreSupport.await(event.get());
+            if (row.getString("correlationId") != null && !row.getString("correlationId").isBlank())
+                correlationId = row.getString("correlationId");
             String shopId = row.getString("shopId"), orderId = row.getString("orderId"), customerId = row.getString("customerUserId");
             DocumentSnapshot order = FirestoreSupport.await(db.collection("orders").document(orderId).get());
             if ("UNCLAIMED".equals(row.getString("eventType")) && (!order.exists()
@@ -98,9 +111,33 @@ public class OrderNotificationDispatcher {
                     + "</strong>.</p><p>Please contact the shop if you need assistance.</p>";
             String messageId = brevo.send(eventId, email, name, subject, html, text);
             complete(db, event, claim, "SENT", messageId);
+            log.info("email_outbox_sent correlationId={}", correlationId);
         } catch (RuntimeException exception) {
-            retry(db, event, eventId, claim, exception);
+            retry(db, event, eventId, claim, correlationId, exception);
         }
+    }
+
+    public void retryDeadLetter(FirebasePrincipal principal, String eventId) {
+        if (principal == null || !"PLATFORM_ADMIN".equals(principal.role()))
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,
+                    "Platform administrator access is required.");
+        if (eventId == null || eventId.isBlank() || eventId.contains("/"))
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "Invalid notification event reference.");
+        Firestore db = firebase.firestore();
+        DocumentReference event = db.collection("notificationOutbox").document(eventId);
+        FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(event));
+            if (!current.exists()) throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.NOT_FOUND, "Notification event was not found.");
+            if (!"DEAD_LETTER".equals(current.getString("status"))) throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.CONFLICT, "Only a dead-letter notification can be retried.");
+            tx.update(event, Map.of("status", "PENDING", "attempts", 0L,
+                    "nextAttemptAtMillis", System.currentTimeMillis(), "claimToken", com.google.cloud.firestore.FieldValue.delete(),
+                    "leaseUntilMillis", com.google.cloud.firestore.FieldValue.delete(),
+                    "lastErrorType", com.google.cloud.firestore.FieldValue.delete()));
+            return null;
+        });
     }
 
     private static void complete(Firestore db, DocumentReference event, String claim, String status, String messageId) {
@@ -115,21 +152,23 @@ public class OrderNotificationDispatcher {
         });
     }
 
-    private static void retry(Firestore db, DocumentReference event, String eventId, String claim, RuntimeException error) {
+    private static void retry(Firestore db, DocumentReference event, String eventId, String claim,
+            String correlationId, RuntimeException error) {
         try {
             FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(event));
                 if (!current.exists() || !claim.equals(current.getString("claimToken"))) return null;
                 long attempts = current.getLong("attempts") == null ? 1L : current.getLong("attempts");
                 long delay = Math.min(21_600_000L, 60_000L * (1L << (int) Math.min(8, Math.max(0, attempts - 1))));
-                tx.update(event, Map.of("status", "PENDING", "nextAttemptAtMillis", System.currentTimeMillis() + delay,
+                tx.update(event, Map.of("status", attempts >= MAX_ATTEMPTS ? "DEAD_LETTER" : "PENDING",
+                        "nextAttemptAtMillis", System.currentTimeMillis() + delay,
                         "lastErrorType", error.getClass().getSimpleName(), "claimToken", com.google.cloud.firestore.FieldValue.delete(),
                         "leaseUntilMillis", com.google.cloud.firestore.FieldValue.delete()));
                 return null;
             });
-            log.warn("email_outbox_retry eventId={} errorType={}", eventId, error.getClass().getSimpleName());
+            log.warn("email_outbox_retry correlationId={} errorType={}", correlationId, error.getClass().getSimpleName());
         } catch (RuntimeException writeError) {
-            log.error("email_outbox_recovery_failed eventId={} errorType={}", eventId, writeError.getClass().getSimpleName());
+            log.error("email_outbox_recovery_failed correlationId={} errorType={}", correlationId, writeError.getClass().getSimpleName());
         }
     }
 

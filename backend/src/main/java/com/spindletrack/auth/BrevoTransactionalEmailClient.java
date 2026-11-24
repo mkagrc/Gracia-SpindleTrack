@@ -5,6 +5,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,7 +17,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class BrevoTransactionalEmailClient {
     private final ObjectMapper json;
-    private final HttpClient http = HttpClient.newHttpClient();
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     @Value("${brevo.api-key:}") private String apiKey;
     @Value("${brevo.sender-email:}") private String senderEmail;
     @Value("${brevo.sender-name:SpindleTrack}") private String senderName;
@@ -33,6 +34,7 @@ public class BrevoTransactionalEmailClient {
             payload.put("subject", subject); payload.put("htmlContent", html); payload.put("textContent", text);
             payload.put("headers", Map.of("X-SpindleTrack-Event-Id", eventId));
             HttpRequest request = HttpRequest.newBuilder(URI.create("https://api.brevo.com/v3/smtp/email"))
+                    .timeout(Duration.ofSeconds(10))
                     .header("api-key", apiKey).header("content-type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload), StandardCharsets.UTF_8)).build();
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));

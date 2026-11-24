@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import com.google.cloud.Timestamp;
 import com.google.cloud.firestore.DocumentReference;
@@ -35,21 +36,27 @@ public class OwnerOperationsService {
     public OwnerOperationsService(FirebaseAdminTokenVerifier firebase) { this.firebase = firebase; }
 
     public record UnclaimedOrder(String id, String orderCode, String customerName, BigDecimal kilos,
-            BigDecimal totalPrice, Instant readyAt, Instant unclaimedAt) {}
+            BigDecimal totalPrice, Instant readyAt, Instant unclaimedAt, String unit) {
+        public BigDecimal quantity() { return kilos; }
+    }
     public record DailyMetric(String date, int orderCount, BigDecimal income) {}
     public record MonthlyMetric(String month, int orderCount, BigDecimal income) {}
     public record OwnerReport(DailyMetric today, MonthlyMetric thisMonth, List<DailyMetric> busiestDays) {}
 
     public List<UnclaimedOrder> unclaimed(FirebasePrincipal principal) {
-        String shopId = ownerShop(principal);
+        String shopId = unclaimedShop(principal);
         Firestore db = firebase.firestore();
         requireActive(db, shopId);
         QuerySnapshot snapshot = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("shopId", shopId).get());
         List<UnclaimedOrder> result = new ArrayList<>();
         for (DocumentSnapshot order : snapshot.getDocuments()) {
-            if (!Boolean.TRUE.equals(order.getBoolean("unclaimed")) || !"READY".equals(order.getString("stage"))) continue;
+            if (!shopId.equals(order.getString("shopId")) || !Boolean.TRUE.equals(order.getBoolean("unclaimed"))
+                    || !"READY".equals(order.getString("stage"))) continue;
+            Object quantity = order.get("quantity");
+            if (quantity == null) quantity = order.get("kilos");
             result.add(new UnclaimedOrder(order.getId(), order.getString("orderCode"), order.getString("customerName"),
-                    decimal(order.get("kilos")), decimal(order.get("totalPrice")), instant(order.get("readyAt")), instant(order.get("unclaimedAt"))));
+                    decimal(quantity), Money.fromFirestore(order.get("totalPriceCentavos"), order.get("totalPrice")),
+                    instant(order.get("readyAt")), instant(order.get("unclaimedAt")), order.getString("unit") == null ? "kg" : order.getString("unit")));
         }
         result.sort(Comparator.comparing(UnclaimedOrder::unclaimedAt, Comparator.nullsLast(Comparator.reverseOrder()))
                 .thenComparing(UnclaimedOrder::id));
@@ -83,7 +90,7 @@ public class OwnerOperationsService {
             if (paidAt == null) paidAt = FirestoreSupport.dateTime(payment.get("updatedAt"));
             if (paidAt == null) paidAt = FirestoreSupport.dateTime(payment.get("createdAt"));
             if (paidAt == null) continue;
-            BigDecimal amount = decimal(payment.get("amount"));
+            BigDecimal amount = Money.fromFirestore(payment.get("amountCentavos"), payment.get("amount"));
             if (paidAt.toLocalDate().equals(today)) todayIncome = todayIncome.add(amount);
             if (!paidAt.isBefore(startMonth) && paidAt.isBefore(monthAfter)) monthIncome = monthIncome.add(amount);
         }
@@ -96,17 +103,28 @@ public class OwnerOperationsService {
 
     @Scheduled(cron = "${spindletrack.unclaimed.cron:0 10 0 * * *}", zone = "UTC")
     public void scanUnclaimedDaily() {
-        Firestore db = firebase.firestore();
-        QuerySnapshot ready = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("stage", "READY").get());
-        LocalDateTime cutoff = LocalDateTime.now(ZoneOffset.UTC).minusDays(3);
-        int marked = 0;
-        for (QueryDocumentSnapshot candidate : ready.getDocuments()) {
-            LocalDateTime readyAt = FirestoreSupport.dateTime(candidate.get("readyAt"));
-            if (readyAt == null) readyAt = findReadyTime(db, candidate);
-            if (readyAt == null || readyAt.isAfter(cutoff)) continue;
-            if (markUnclaimed(db, candidate.getId(), candidate.getString("shopId"), readyAt)) marked++;
+        String correlationId = UUID.randomUUID().toString();
+        try {
+            Firestore db = firebase.firestore();
+            QuerySnapshot ready = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("stage", "READY").get());
+            LocalDateTime cutoff = LocalDateTime.now(ZoneOffset.UTC).minusDays(3);
+            int marked = 0;
+            for (QueryDocumentSnapshot candidate : ready.getDocuments()) {
+                try {
+                    LocalDateTime readyAt = FirestoreSupport.dateTime(candidate.get("readyAt"));
+                    if (readyAt == null) readyAt = findReadyTime(db, candidate);
+                    if (readyAt == null || readyAt.isAfter(cutoff)) continue;
+                    if (markUnclaimed(db, candidate.getId(), candidate.getString("shopId"), readyAt)) marked++;
+                } catch (RuntimeException exception) {
+                    log.error("unclaimed_scan_order_failed correlationId={} errorType={}", correlationId,
+                            exception.getClass().getSimpleName());
+                }
+            }
+            if (marked > 0) log.info("unclaimed_scan_completed correlationId={} markedCount={}", correlationId, marked);
+        } catch (RuntimeException exception) {
+            log.error("scheduled_job_failed job=unclaimed-scan correlationId={} errorType={}",
+                    correlationId, exception.getClass().getSimpleName());
         }
-        if (marked > 0) log.info("unclaimed_scan_marked count={}", marked);
     }
 
     private boolean markUnclaimed(Firestore db, String orderId, String shopId, LocalDateTime readyAt) {
@@ -114,6 +132,7 @@ public class OwnerOperationsService {
         DocumentReference order = db.collection(ORDERS).document(orderId);
         String eventId = orderId + "_UNCLAIMED";
         DocumentReference event = db.collection(OUTBOX).document(eventId);
+        String correlationId = UUID.randomUUID().toString();
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             if (!current.exists() || !shopId.equals(current.getString("shopId")) || !"READY".equals(current.getString("stage"))
@@ -123,6 +142,7 @@ public class OwnerOperationsService {
             if (customerId != null && !customerId.isBlank()) {
                 Map<String, Object> values = new HashMap<>();
                 values.put("eventId", eventId); values.put("eventType", "UNCLAIMED"); values.put("shopId", shopId);
+                values.put("correlationId", correlationId);
                 values.put("orderId", orderId); values.put("customerUserId", customerId); values.put("status", "PENDING");
                 values.put("attempts", 0); values.put("nextAttemptAtMillis", System.currentTimeMillis());
                 values.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
@@ -151,6 +171,13 @@ public class OwnerOperationsService {
     private static String ownerShop(FirebasePrincipal principal) {
         if (principal == null || !"OWNER".equals(principal.role())) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Owner access is required.");
         if (principal.shopId() == null || principal.shopId().isBlank()) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This account is not linked to a shop.");
+        return principal.shopId();
+    }
+    private static String unclaimedShop(FirebasePrincipal principal) {
+        if (principal == null || !List.of("OWNER", "STAFF").contains(principal.role()))
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Owner or staff access is required.");
+        if (principal.shopId() == null || principal.shopId().isBlank())
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This account is not linked to a shop.");
         return principal.shopId();
     }
     private static BigDecimal decimal(Object value) {

@@ -20,6 +20,7 @@ import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.Query;
+import com.google.cloud.firestore.QueryDocumentSnapshot;
 import com.google.cloud.firestore.QuerySnapshot;
 import com.google.cloud.firestore.Transaction;
 import com.spindletrack.LaundryStage;
@@ -41,11 +42,50 @@ class ShopOrderServiceTest {
         assertEquals("svc-string-A", first.serviceId());
         assertEquals("Wash and fold", first.serviceName());
         assertEquals(new BigDecimal("2.35"), first.kilos());
+        assertEquals("kg", first.unit());
         assertEquals(new BigDecimal("30.75"), first.totalPrice());
         assertEquals(LaundryStage.RECEIVED, first.stage());
         verify(f.transaction).create(eq(f.orderRef), argThat(values -> !values.containsKey("items")
-                && !values.containsKey("total") && new BigDecimal("30.75").equals(values.get("totalPrice"))));
+                && !values.containsKey("total") && Long.valueOf(3075L).equals(values.get("totalPriceCentavos"))
+                && new BigDecimal("2.35").equals(values.get("quantity")) && "kg".equals(values.get("unit"))));
         verify(f.transaction).create(eq(f.priceLogRef), any());
+    }
+
+    @Test
+    void orderUnitFollowsServiceForPieceAndLoadWithoutChangingStaffEnteredPrice() throws Exception {
+        for (String unit : List.of("piece", "load")) {
+            Fixture f = new Fixture();
+            when(f.serviceSnapshot.getString("unit")).thenReturn(unit);
+            f.runTransaction();
+            ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).create(f.staff(), f.request());
+            assertEquals(unit, result.unit());
+            assertEquals(new BigDecimal("30.75"), result.totalPrice());
+            verify(f.transaction).create(eq(f.orderRef), argThat(values -> unit.equals(values.get("unit"))
+                    && new BigDecimal("2.35").equals(values.get("quantity"))
+                    && Long.valueOf(3075L).equals(values.get("totalPriceCentavos"))));
+        }
+    }
+
+    @Test
+    void legacyKilosOnlyOrderIsReturnedWithKgUnit() throws Exception {
+        Fixture f = new Fixture();
+        Query query = mock(Query.class);
+        QuerySnapshot rows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot legacy = mock(QueryDocumentSnapshot.class);
+        when(f.orders.whereEqualTo("shopId", "shop-string-A")).thenReturn(query);
+        when(query.get()).thenReturn(ApiFutures.immediateFuture(rows));
+        when(rows.getDocuments()).thenReturn(List.of(legacy));
+        when(legacy.getId()).thenReturn("legacy-order-1");
+        when(legacy.getString("shopId")).thenReturn("shop-string-A");
+        when(legacy.getString("orderCode")).thenReturn("O-000001");
+        when(legacy.getString("customerName")).thenReturn("Legacy customer");
+        when(legacy.getString("stage")).thenReturn("READY");
+        when(legacy.get("kilos")).thenReturn(new BigDecimal("4.25"));
+        when(legacy.get("totalPrice")).thenReturn(new BigDecimal("50.00"));
+
+        ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).list(f.owner(), null, null, 0).content().get(0);
+        assertEquals(new BigDecimal("4.25"), result.quantity());
+        assertEquals("kg", result.unit());
     }
 
     @Test

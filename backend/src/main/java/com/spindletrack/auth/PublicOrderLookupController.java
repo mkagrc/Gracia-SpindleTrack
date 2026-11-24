@@ -10,9 +10,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/public/orders")
 public class PublicOrderLookupController {
     private final PublicOrderLookupService lookups;
+    private final PublicClientAddressResolver clientAddresses;
 
-    public PublicOrderLookupController(PublicOrderLookupService lookups) {
+    public PublicOrderLookupController(PublicOrderLookupService lookups, PublicClientAddressResolver clientAddresses) {
         this.lookups = lookups;
+        this.clientAddresses = clientAddresses;
     }
 
     @GetMapping("/lookup")
@@ -20,6 +22,6 @@ public class PublicOrderLookupController {
             @RequestParam(required = false) String orderCode,
             @RequestParam(required = false) String mobile,
             HttpServletRequest request) {
-        return lookups.lookup(orderCode, mobile, request.getRemoteAddr());
+        return lookups.lookup(orderCode, mobile, clientAddresses.resolve(request));
     }
 }

@@ -15,7 +15,7 @@ public class OwnerOperationsController {
     public OwnerOperationsController(OwnerOperationsService operations) { this.operations = operations; }
 
     @GetMapping("/unclaimed")
-    @PreAuthorize("hasRole('OWNER')")
+    @PreAuthorize("hasAnyRole('OWNER','STAFF')")
     public List<OwnerOperationsService.UnclaimedOrder> unclaimed(@AuthenticationPrincipal FirebasePrincipal principal) {
         return operations.unclaimed(principal);
     }

@@ -13,6 +13,8 @@ import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.QuerySnapshot;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -30,7 +32,7 @@ public class ShopServiceCatalog {
 
     public record ServiceRequest(
             @NotBlank(message = "Service name is required.") @Size(max = 80, message = "Service name must be 80 characters or fewer.") String name,
-            @NotNull(message = "Price per unit is required.") @DecimalMin(value = "0.0", inclusive = false, message = "Price per unit must be greater than zero.") BigDecimal pricePerUnit,
+            @NotNull(message = "Price per unit is required.") @DecimalMin(value = "0.0", inclusive = false, message = "Price per unit must be greater than zero.") @DecimalMax(value = "100000.00", message = "Price per unit must be no more than 100000.00.") @Digits(integer = 6, fraction = 2, message = "Price per unit must have at most 2 decimal places.") BigDecimal pricePerUnit,
             @NotBlank(message = "Choose a unit: kg, piece, or load.") @Pattern(regexp = "kg|piece|load", message = "Unit must be kg, piece, or load.") String unit) {}
 
     public record ShopService(String id, String name, BigDecimal pricePerUnit, String unit, boolean active, Instant createdAt) {}
@@ -51,6 +53,7 @@ public class ShopServiceCatalog {
 
     public ShopService create(String shopId, ServiceRequest request) {
         String ownerShop = requireShop(shopId);
+        validatePrice(request);
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection("shops").document(ownerShop);
         DocumentReference service = db.collection(COLLECTION).document();
@@ -74,6 +77,7 @@ public class ShopServiceCatalog {
 
     public ShopService update(String shopId, String serviceId, ServiceRequest request) {
         String ownerShop = requireShop(shopId);
+        validatePrice(request);
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection("shops").document(ownerShop);
         DocumentReference service = db.collection(COLLECTION).document(requireId(serviceId));
@@ -137,5 +141,13 @@ public class ShopServiceCatalog {
     private static String requireId(String id) {
         if (id == null || id.isBlank() || id.contains("/")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid service ID.");
         return id;
+    }
+    private static void validatePrice(ServiceRequest request) {
+        BigDecimal price = request == null ? null : request.pricePerUnit();
+        if (price == null || price.compareTo(BigDecimal.ZERO) <= 0
+                || price.compareTo(new BigDecimal("100000.00")) > 0 || price.scale() > 2) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Price per unit must be greater than zero, no more than 100000.00, and have at most 2 decimal places.");
+        }
     }
 }

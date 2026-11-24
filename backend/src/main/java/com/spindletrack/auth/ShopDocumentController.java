@@ -25,7 +25,7 @@ public class ShopDocumentController {
     @PreAuthorize("hasAnyRole('PLATFORM_ADMIN', 'OWNER')")
     public ResponseEntity<InputStreamResource> open(@PathVariable String documentId,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        ShopDocumentDownload download = registrations.openDocument(documentId, principal.userId(), principal.role());
+        ShopDocumentDownload download = registrations.openDocument(documentId, principal.uid(), principal.role());
         ContentDisposition disposition = ContentDisposition.attachment()
                 .filename(download.originalFilename(), StandardCharsets.UTF_8).build();
         return ResponseEntity.ok().contentType(MediaType.parseMediaType(download.contentType()))

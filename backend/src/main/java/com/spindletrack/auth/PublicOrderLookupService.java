@@ -27,9 +27,8 @@ public class PublicOrderLookupService {
     }
 
     public record StageEvent(LaundryStage stage, Instant changedAt) {}
-    public record PaymentEvent(String status, String method, Instant occurredAt) {}
     public record WalkInOrder(String orderCode, String maskedMobile, LaundryStage currentStage,
-            String paymentStatus, List<StageEvent> stageHistory, List<PaymentEvent> paymentHistory) {}
+            String paymentStatus, List<StageEvent> stageHistory, java.math.BigDecimal quantity, String unit) {}
 
     public WalkInOrder lookup(String orderCode, String mobile, String remoteAddress) {
         rateLimits.recordPublicOrderLookupAttempt(remoteAddress);
@@ -66,20 +65,14 @@ public class PublicOrderLookupService {
             }
         }
         stages.sort(Comparator.comparing(StageEvent::changedAt, Comparator.nullsLast(Comparator.naturalOrder())));
-
-        QuerySnapshot paymentRows = FirestoreSupport.await(db.collection("payments")
-                .whereEqualTo("shopId", shopId).whereEqualTo("orderId", orderId).get());
-        List<PaymentEvent> payments = new ArrayList<>();
-        for (DocumentSnapshot row : paymentRows.getDocuments()) {
-            String status = row.getString("status");
-            String method = row.getString("method");
-            if (status == null || method == null) continue;
-            Object eventTime = "PAID".equals(status) ? row.get("updatedAt") : row.get("createdAt");
-            payments.add(new PaymentEvent(status, method, instant(eventTime)));
-        }
-        payments.sort(Comparator.comparing(PaymentEvent::occurredAt, Comparator.nullsLast(Comparator.naturalOrder())));
+        Object quantity = match.get("quantity");
+        if (quantity == null) quantity = match.get("kilos");
+        java.math.BigDecimal parsedQuantity = quantity instanceof java.math.BigDecimal decimal ? decimal
+                : quantity instanceof Number number ? new java.math.BigDecimal(number.toString()) : java.math.BigDecimal.ZERO;
+        String unit = match.getString("unit");
+        if (unit == null || unit.isBlank()) unit = "kg";
         return new WalkInOrder(code, maskMobile(normalizedMobile), parseStage(match.getString("stage")),
-                paymentStatus(match.getString("paymentStatus")), List.copyOf(stages), List.copyOf(payments));
+                paymentStatus(match.getString("paymentStatus")), List.copyOf(stages), parsedQuantity, unit);
     }
 
     private static ResponseStatusException notFound() {

@@ -35,4 +35,25 @@ class AdminShopOrderCountTest {
         assertEquals(1, page.content().size());
         assertEquals(2, page.content().get(0).orderCount());
     }
+
+    @Test
+    void listReturnsZeroWhenShopHasNoOrders() {
+        FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
+        Firestore db = mock(Firestore.class);
+        CollectionReference shops = mock(CollectionReference.class), users = mock(CollectionReference.class), orders = mock(CollectionReference.class);
+        QuerySnapshot shopRows = mock(QuerySnapshot.class), userRows = mock(QuerySnapshot.class), orderRows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot shop = mock(QueryDocumentSnapshot.class);
+        Query scoped = mock(Query.class);
+        when(firebase.firestore()).thenReturn(db);
+        when(db.collection("shops")).thenReturn(shops); when(db.collection("users")).thenReturn(users); when(db.collection("orders")).thenReturn(orders);
+        when(shops.get()).thenReturn(ApiFutures.immediateFuture(shopRows)); when(shopRows.getDocuments()).thenReturn(List.of(shop));
+        when(users.get()).thenReturn(ApiFutures.immediateFuture(userRows)); when(userRows.getDocuments()).thenReturn(List.of());
+        when(shop.getId()).thenReturn("shop-empty"); when(shop.getString("name")).thenReturn("Empty shop");
+        when(shop.getString("status")).thenReturn("ACTIVE");
+        when(orders.whereEqualTo("shopId", "shop-empty")).thenReturn(scoped);
+        when(scoped.get()).thenReturn(ApiFutures.immediateFuture(orderRows)); when(orderRows.getDocuments()).thenReturn(List.of());
+
+        AdminShopService.PageResult page = new AdminShopService(firebase, mock(ShopDocumentRepository.class)).list(null, null, 0);
+        assertEquals(0, page.content().get(0).orderCount());
+    }
 }

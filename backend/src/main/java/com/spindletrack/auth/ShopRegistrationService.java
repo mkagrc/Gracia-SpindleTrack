@@ -177,7 +177,17 @@ public class ShopRegistrationService {
     public ShopDocumentDownload openDocument(String documentId, String requesterId, String role) {
         ShopDocumentRecord document = documents.findById(documentId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Document was not found."));
-        documentAccess.requireCanOpen(role, requesterId, document.uploadedBy());
+        if ("OWNER".equals(role)) {
+            UserAccount owner = users.findByFirebaseUid(requesterId)
+                    .filter(UserAccount::active)
+                    .filter(account -> "OWNER".equals(account.role()))
+                    .filter(account -> account.shopId() != null && account.shopId().equals(document.shopId()))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN,
+                            "You can only open verification documents for your own shop."));
+            documentAccess.requireCanOpen(role, owner.id(), document.uploadedBy());
+        } else {
+            documentAccess.requireCanOpen(role, requesterId, document.uploadedBy());
+        }
         try {
             InputStream content = fileStorage.open(document.storedFilename());
             return new ShopDocumentDownload(content, document.originalFilename(), document.contentType(), document.sizeBytes());

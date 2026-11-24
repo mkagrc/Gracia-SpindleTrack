@@ -34,9 +34,9 @@ class OwnerShopControllerTest {
 
     @Test
     void ownerCanReadAndEditOnlyProfileAssociatedWithAuthenticatedShop() throws Exception {
-        when(shops.getMine("shop-12")).thenReturn(new OwnerShopService.ShopProfile("shop-12", "Mine", "Address", "1234567", "ACTIVE"));
+        when(shops.getMine("shop-12")).thenReturn(new OwnerShopService.ShopProfile("shop-12", "Mine", "Address", "1234567", "ACTIVE", null, null));
         when(shops.updateMine(org.mockito.ArgumentMatchers.eq("shop-12"), org.mockito.ArgumentMatchers.any()))
-                .thenReturn(new OwnerShopService.ShopProfile("shop-12", "New Name", "New Address", "7654321", "ACTIVE"));
+                .thenReturn(new OwnerShopService.ShopProfile("shop-12", "New Name", "New Address", "7654321", "ACTIVE", null, null));
         mvc.perform(get("/api/shops/mine").with(authentication(auth("OWNER", "shop-12")))).andExpect(status().isOk());
         mvc.perform(put("/api/shops/mine").with(authentication(auth("OWNER", "shop-12"))).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"name\":\"New Name\",\"address\":\"New Address\",\"contactNumber\":\"7654321\"}"))

@@ -32,13 +32,10 @@ class PublicOrderLookupServiceTest {
         CollectionReference orders = mock(CollectionReference.class);
         CollectionReference shops = mock(CollectionReference.class);
         CollectionReference history = mock(CollectionReference.class);
-        CollectionReference payments = mock(CollectionReference.class);
         Query orderQuery = mock(Query.class);
         Query historyQuery = mock(Query.class);
-        Query paymentQuery = mock(Query.class);
         QuerySnapshot orderRows = mock(QuerySnapshot.class);
         QuerySnapshot stageRows = mock(QuerySnapshot.class);
-        QuerySnapshot paymentRows = mock(QuerySnapshot.class);
         QueryDocumentSnapshot order = mock(QueryDocumentSnapshot.class);
         DocumentSnapshot shop = mock(DocumentSnapshot.class);
         DocumentReference shopRef = mock(DocumentReference.class);
@@ -53,6 +50,8 @@ class PublicOrderLookupServiceTest {
         when(order.getString("shopId")).thenReturn("shop-string-1");
         when(order.getString("stage")).thenReturn("READY");
         when(order.getString("paymentStatus")).thenReturn("PENDING");
+        when(order.get("quantity")).thenReturn(new java.math.BigDecimal("2.50"));
+        when(order.getString("unit")).thenReturn("piece");
 
         when(db.collection("shops")).thenReturn(shops);
         when(shops.document("shop-string-1")).thenReturn(shopRef);
@@ -65,11 +64,6 @@ class PublicOrderLookupServiceTest {
         when(historyQuery.whereEqualTo("orderId", "order-string-1")).thenReturn(historyQuery);
         when(historyQuery.get()).thenReturn(ApiFutures.immediateFuture(stageRows));
         when(stageRows.getDocuments()).thenReturn(List.of());
-        when(db.collection("payments")).thenReturn(payments);
-        when(payments.whereEqualTo("shopId", "shop-string-1")).thenReturn(paymentQuery);
-        when(paymentQuery.whereEqualTo("orderId", "order-string-1")).thenReturn(paymentQuery);
-        when(paymentQuery.get()).thenReturn(ApiFutures.immediateFuture(paymentRows));
-        when(paymentRows.getDocuments()).thenReturn(List.of());
 
         PublicOrderLookupService.WalkInOrder result = new PublicOrderLookupService(firebase, limits)
                 .lookup(" o-000123 ", "+63 917 123 4567", "198.51.100.9");
@@ -78,8 +72,10 @@ class PublicOrderLookupServiceTest {
         assertEquals("********4567", result.maskedMobile());
         assertEquals(com.spindletrack.LaundryStage.READY, result.currentStage());
         assertEquals("PENDING", result.paymentStatus());
+        assertEquals(new java.math.BigDecimal("2.50"), result.quantity());
+        assertEquals("piece", result.unit());
         assertTrue(result.stageHistory().isEmpty());
-        assertTrue(result.paymentHistory().isEmpty());
+        verify(db, never()).collection("payments");
         verify(limits).recordPublicOrderLookupAttempt("198.51.100.9");
     }
 

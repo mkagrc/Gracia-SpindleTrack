@@ -1,6 +1,7 @@
 package com.spindletrack.auth;
 
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -17,6 +18,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
+import jakarta.servlet.http.HttpServletRequest;
 
 @WebMvcTest(PublicOrderLookupController.class)
 @Import(SecurityConfig.class)
@@ -25,12 +27,14 @@ class PublicOrderLookupControllerTest {
     @MockitoBean PublicOrderLookupService lookups;
     @MockitoBean FirebaseTokenVerifier verifier;
     @MockitoBean UserAccountRepository users;
+    @MockitoBean PublicClientAddressResolver clientAddresses;
 
     @Test
     void exactLookupRouteIsAnonymousAndReturnsOnlyTheConstrainedTrackingPayload() throws Exception {
         when(lookups.lookup("O-000123", "639171234567", "127.0.0.1"))
                 .thenReturn(new PublicOrderLookupService.WalkInOrder("O-000123", "********4567",
-                        LaundryStage.READY, "UNPAID", List.of(), List.of()));
+                        LaundryStage.READY, "UNPAID", List.of(), new java.math.BigDecimal("42.00"), "kg"));
+        when(clientAddresses.resolve(any(HttpServletRequest.class))).thenReturn("127.0.0.1");
 
         mvc.perform(get("/api/public/orders/lookup").param("orderCode", "O-000123")
                         .param("mobile", "639171234567"))
@@ -38,10 +42,12 @@ class PublicOrderLookupControllerTest {
                 .andExpect(jsonPath("$.orderCode").value("O-000123"))
                 .andExpect(jsonPath("$.maskedMobile").value("********4567"))
                 .andExpect(jsonPath("$.currentStage").value("READY"))
+                .andExpect(jsonPath("$.unit").value("kg"))
                 .andExpect(jsonPath("$.paymentStatus").value("UNPAID"))
                 .andExpect(jsonPath("$.customerName").doesNotExist())
                 .andExpect(jsonPath("$.totalPrice").doesNotExist())
-                .andExpect(jsonPath("$.shopId").doesNotExist());
+                .andExpect(jsonPath("$.shopId").doesNotExist())
+                .andExpect(jsonPath("$.paymentHistory").doesNotExist());
 
         mvc.perform(get("/api/public/orders/other"))
                 .andExpect(status().isUnauthorized());
@@ -52,6 +58,7 @@ class PublicOrderLookupControllerTest {
         when(lookups.lookup("bad", "bad", "127.0.0.1")).thenThrow(
                 new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Order could not be found. Check the order code and mobile number."));
+        when(clientAddresses.resolve(any(HttpServletRequest.class))).thenReturn("127.0.0.1");
 
         mvc.perform(get("/api/public/orders/lookup").param("orderCode", "bad").param("mobile", "bad"))
                 .andExpect(status().isNotFound())

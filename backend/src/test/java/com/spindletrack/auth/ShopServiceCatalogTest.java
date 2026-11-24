@@ -85,6 +85,21 @@ class ShopServiceCatalogTest {
         verify(transaction, never()).update(any(DocumentReference.class), any());
     }
 
+    @Test
+    void servicePricesMustBePositiveAtMostTwoDecimalsAndNoMoreThanOneHundredThousand() {
+        FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
+        ShopServiceCatalog catalog = new ShopServiceCatalog(firebase);
+        for (java.math.BigDecimal invalid : List.of(java.math.BigDecimal.ZERO,
+                new java.math.BigDecimal("-1.00"), new java.math.BigDecimal("1.001"),
+                new java.math.BigDecimal("100000.01"))) {
+            ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> catalog.create(
+                    "shop-string-A", new ShopServiceCatalog.ServiceRequest("Wash", invalid, "kg")));
+            assertEquals(HttpStatus.BAD_REQUEST, error.getStatusCode());
+        }
+        assertThrows(ResponseStatusException.class, () -> catalog.update("shop-string-A", "service-id",
+                new ShopServiceCatalog.ServiceRequest("Wash", new java.math.BigDecimal("100000.001"), "kg")));
+    }
+
     private static QueryDocumentSnapshot service(String id, String name, boolean active) {
         QueryDocumentSnapshot snapshot = mock(QueryDocumentSnapshot.class);
         when(snapshot.getId()).thenReturn(id);

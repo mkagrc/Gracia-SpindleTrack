@@ -50,6 +50,18 @@ class ShopOperationPolicyTest {
     }
 
     @Test
+    void publicShopDirectoryIsAccessibleEvenForOwnersWithNonActiveShops() {
+        for (String status : INACTIVE_STATUSES) {
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "GET", "/api/public/shops"),
+                    "OWNER with " + status + " shop must reach public shop list");
+            assertTrue(ShopOperationPolicy.mayUseShopOperations(
+                    "OWNER", status, "GET", "/api/public/shops/shop-abc123"),
+                    "OWNER with " + status + " shop must reach public shop detail");
+        }
+    }
+
+    @Test
     void activeCustomersAndPlatformAdminsAreNotAffectedByShopStatus() {
         for (String role : List.of("CUSTOMER", "PLATFORM_ADMIN")) {
             for (String status : INACTIVE_STATUSES) {

@@ -45,8 +45,18 @@ class OwnerOperationsControllerTest {
     }
 
     @Test
-    void allNonOwnersAreForbiddenFromBothEndpoints() throws Exception {
-        for (String role : List.of("STAFF", "CUSTOMER", "PLATFORM_ADMIN")) {
+    void staffCanReadOnlyTheShopUnclaimedList() throws Exception {
+        when(operations.unclaimed(org.mockito.ArgumentMatchers.any())).thenReturn(List.of());
+        mvc.perform(get("/api/shops/mine/unclaimed").with(authentication(auth("STAFF"))))
+                .andExpect(status().isOk());
+        mvc.perform(get("/api/shops/mine/reports").with(authentication(auth("STAFF"))))
+                .andExpect(status().isForbidden());
+        verify(operations).unclaimed(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void adminAndCustomerAreForbiddenFromBothEndpoints() throws Exception {
+        for (String role : List.of("CUSTOMER", "PLATFORM_ADMIN")) {
             mvc.perform(get("/api/shops/mine/unclaimed").with(authentication(auth(role)))).andExpect(status().isForbidden());
             mvc.perform(get("/api/shops/mine/reports").with(authentication(auth(role)))).andExpect(status().isForbidden());
         }

@@ -34,12 +34,13 @@ class CustomerOrderControllerTest {
     void customerCanReadOwnOrderListAndDetail() throws Exception {
         ShopOrderService.CustomerOrderSummary summary = new ShopOrderService.CustomerOrderSummary(
                 "order-string-1", "O-000001", "Laundry One", "Wash", new java.math.BigDecimal("2.00"),
-                new java.math.BigDecimal("50.00"), LaundryStage.RECEIVED, "UNPAID", null, null, java.time.Instant.now());
+                new java.math.BigDecimal("50.00"), LaundryStage.RECEIVED, "UNPAID", null, null, java.time.Instant.now(), "kg");
         when(orders.listMyOrders(any(), eq(0))).thenReturn(new ShopOrderService.CustomerOrdersPage(List.of(summary), 0, 20, 1, 1));
         when(orders.getMyOrder(any(), eq("order-string-1"))).thenReturn(new ShopOrderService.CustomerOrderDetail(summary, List.of(), List.of()));
 
         mvc.perform(get("/api/me/orders").with(authentication(auth("CUSTOMER"))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.content[0].orderCode").value("O-000001"))
+                .andExpect(jsonPath("$.content[0].unit").value("kg"))
                 .andExpect(jsonPath("$.content[0].customerName").doesNotExist())
                 .andExpect(jsonPath("$.content[0].mobile").doesNotExist());
         mvc.perform(get("/api/me/orders/order-string-1").with(authentication(auth("CUSTOMER"))))

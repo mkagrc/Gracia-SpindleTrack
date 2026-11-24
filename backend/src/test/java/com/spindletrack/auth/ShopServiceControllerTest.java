@@ -66,6 +66,17 @@ class ShopServiceControllerTest {
         verify(services).update(eq("shop-string-A"), eq("svc-auto-id-abc"), org.mockito.ArgumentMatchers.any());
     }
 
+    @Test
+    void invalidServicePricesReturnBadRequest() throws Exception {
+        for (String price : List.of("0", "-1", "1.001", "100000.01")) {
+            mvc.perform(post("/api/shops/services").with(authentication(auth("OWNER")))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"name\":\"Wash\",\"pricePerUnit\":" + price + ",\"unit\":\"kg\"}"))
+                    .andExpect(status().isBadRequest());
+        }
+        org.mockito.Mockito.verifyNoInteractions(services);
+    }
+
     private static UsernamePasswordAuthenticationToken auth(String role) {
         FirebasePrincipal principal = new FirebasePrincipal("uid", "owner@example.com", "Account", "user-id-77", role, "shop-string-A", "ACTIVE");
         return new UsernamePasswordAuthenticationToken(principal, null,

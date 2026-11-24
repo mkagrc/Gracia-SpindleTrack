@@ -172,6 +172,7 @@ class CustomerLinkedOrderServiceTest {
             when(service.exists()).thenReturn(true);
             when(service.getString("shopId")).thenReturn("shop-A");
             when(service.getString("name")).thenReturn("Wash");
+            when(service.getString("unit")).thenReturn("kg");
             when(service.getBoolean("active")).thenReturn(true);
             when(customerSnapshot.exists()).thenReturn(true);
             when(customerSnapshot.getBoolean("active")).thenReturn(true);

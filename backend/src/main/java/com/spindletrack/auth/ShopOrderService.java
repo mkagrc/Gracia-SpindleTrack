@@ -9,11 +9,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.QuerySnapshot;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.spindletrack.LaundryStage;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
@@ -54,7 +57,7 @@ public class ShopOrderService {
     public record CreateOrderRequest(@NotBlank(message = "Customer name is required.") @Size(max = 120, message = "Customer name must be 120 characters or fewer.") String customerName,
             @NotBlank(message = "Customer mobile number is required.") @Size(max = 32, message = "Customer mobile number is too long.") String mobile,
             @NotBlank(message = "Choose a service.") String serviceId,
-            @NotNull(message = "Kilos are required.") @DecimalMin(value = "0.0", inclusive = false, message = "Kilos must be greater than zero.") @Digits(integer = 3, fraction = 2, message = "Kilos must be no more than 999.99 with at most 2 decimal places.") BigDecimal kilos,
+            @JsonAlias("quantity") @NotNull(message = "Quantity is required.") @DecimalMin(value = "0.0", inclusive = false, message = "Quantity must be greater than zero.") @Digits(integer = 3, fraction = 2, message = "Quantity must be no more than 999.99 with at most 2 decimal places.") BigDecimal kilos,
             @NotNull(message = "Total price is required.") @DecimalMin(value = "0.0", message = "Total price cannot be negative.") @Digits(integer = 6, fraction = 2, message = "Total price must be no more than 999999.99 with at most 2 decimal places.") BigDecimal totalPrice,
             @Size(max = 1000, message = "Notes must be 1000 characters or fewer.") String notes,
             @Email(message = "Enter a valid customer email address.") @Size(max = 254, message = "Customer email is too long.") String customerEmail) {
@@ -67,14 +70,25 @@ public class ShopOrderService {
             String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
             String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
             String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
-            String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference) {
+            String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference, String unit) {
+        @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
+                String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
+                String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
+                String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
+                String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference) {
+            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos,
+                    totalPrice, notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt,
+                    paidByUid, paidByName, paymentLinkId, paymentLinkUrl, paymentAmountCentavos,
+                    paymentOrderIdReference, "kg");
+        }
         public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
                 String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
                 String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
                 String paymentMethod, Instant paidAt, String paidByUid, String paidByName) {
             this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos,
                     totalPrice, notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt,
-                    paidByUid, paidByName, null, null, null, null);
+                    paidByUid, paidByName, null, null, null, null, "kg");
         }
     }
     public record PaymentLinkResult(OrderSummary order, String paymentLinkId, String paymentLinkUrl) {}
@@ -86,7 +100,9 @@ public class ShopOrderService {
     public record CustomerMatch(String name) {}
     public record CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
             BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
-            String paymentMethod, Instant paidAt, Instant createdAt) {}
+            String paymentMethod, Instant paidAt, Instant createdAt, String unit) {
+        public BigDecimal quantity() { return kilos; }
+    }
     public record CustomerStageEvent(LaundryStage stage, String changedByName, Instant changedAt) {}
     public record CustomerPaymentEvent(String status, String method, Instant occurredAt) {}
     public record CustomerOrdersPage(List<CustomerOrderSummary> content, int number, int size, long totalElements, int totalPages) {}
@@ -251,6 +267,7 @@ public class ShopOrderService {
                     ? counterSnapshot.getLong("lastNumber") : 0L) + 1L;
             String code = "O-" + String.format(Locale.ROOT, "%06d", nextNumber);
             String serviceName = serviceSnapshot.getString("name");
+            String unit = serviceUnit(serviceSnapshot);
             Map<String, Object> orderValues = new HashMap<>();
             orderValues.put("shopId", shopId);
             orderValues.put("orderCode", code);
@@ -259,8 +276,10 @@ public class ShopOrderService {
             orderValues.put("customerUserId", resolvedCustomer == null ? null : resolvedCustomer.id());
             orderValues.put("serviceId", serviceId);
             orderValues.put("serviceName", serviceName);
+            orderValues.put("quantity", kilos);
+            orderValues.put("unit", unit);
             orderValues.put("kilos", kilos);
-            orderValues.put("totalPrice", price);
+            orderValues.put("totalPriceCentavos", Money.toCentavos(price));
             orderValues.put("notes", notes);
             orderValues.put("stage", LaundryStage.RECEIVED.name());
             orderValues.put("paymentStatus", "UNPAID");
@@ -276,7 +295,8 @@ public class ShopOrderService {
             tx.create(stageHistory, historyValues(shopId, order.getId(), LaundryStage.RECEIVED, changedBy, changedByName));
             tx.create(priceHistory, priceValues);
             return new OrderSummary(order.getId(), shopId, code, customerName, mobile, resolvedCustomer == null ? null : resolvedCustomer.id(), serviceId, serviceName,
-                    kilos, price, notes, LaundryStage.RECEIVED, createdAt, changedBy, "UNPAID", null, null, null, null);
+                    kilos, price, notes, LaundryStage.RECEIVED, createdAt, changedBy, "UNPAID", null, null, null, null,
+                    null, null, null, null, unit);
         });
     }
 
@@ -298,8 +318,10 @@ public class ShopOrderService {
             requireOwned(current, shopId);
             if (isPaymentLocked(current)) throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Cancel the pending payment link or record its payment before changing the price.");
-            BigDecimal previousPrice = decimal(current.get("totalPrice"));
-            tx.update(order, Map.of("totalPrice", newPrice, "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            BigDecimal previousPrice = orderPrice(current);
+            tx.update(order, Map.of("totalPriceCentavos", Money.toCentavos(newPrice),
+                    "totalPrice", com.google.cloud.firestore.FieldValue.delete(),
+                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             tx.create(log, priceHistoryValues(previousPrice, newPrice, changedByUid, changedByName));
             return replacePrice(mapOrder(current), newPrice);
         });
@@ -351,7 +373,7 @@ public class ShopOrderService {
             if (current.getString("paymentRecordId") != null)
                 tx.update(db.collection(PAYMENTS).document(current.getString("paymentRecordId")), Map.of(
                         "status", "SUPERSEDED", "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-            tx.create(paymentRef, paymentRecord(shopId, id, decimal(current.get("totalPrice")), "CASH", "PAID", paidByUid, paidByName, null));
+            tx.create(paymentRef, paymentRecord(shopId, id, orderPrice(current), "CASH", "PAID", paidByUid, paidByName, null));
             return withPayment(mapOrder(current), "PAID", "CASH", paidAt, paidByUid, paidByName);
         });
         return result;
@@ -370,8 +392,8 @@ public class ShopOrderService {
         requireOwned(initialOrder, shopId);
         if (!"UNPAID".equals(paymentStatus(initialOrder)))
             throw new ResponseStatusException(HttpStatus.CONFLICT, "A payment link can be created only for an unpaid order.");
-        BigDecimal total = decimal(initialOrder.get("totalPrice"));
-        long amountCentavos = total.movePointRight(2).longValueExact();
+        BigDecimal total = orderPrice(initialOrder);
+        long amountCentavos = Money.toCentavos(total);
         if (amountCentavos < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayMongo payment links require a total of at least ₱1.00.");
         PayMongoGateway.CreatedLink link = gateway().createPaymentLink(amountCentavos, id, initialOrder.getString("orderCode"));
         if (link.amountCentavos() != amountCentavos || !"PHP".equals(link.currency())) {
@@ -386,7 +408,7 @@ public class ShopOrderService {
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
                 requireActiveShop(shopSnapshot);
                 requireOwned(current, shopId);
-                if (!"UNPAID".equals(paymentStatus(current)) || decimal(current.get("totalPrice")).compareTo(total) != 0)
+                if (!"UNPAID".equals(paymentStatus(current)) || orderPrice(current).compareTo(total) != 0)
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "The order changed before its payment link was created. Refresh and try again.");
                 Map<String, Object> values = new HashMap<>();
                 values.put("paymentStatus", "PENDING"); values.put("paymentMethod", "ONLINE");
@@ -414,8 +436,10 @@ public class ShopOrderService {
         DocumentReference order = db.collection(ORDERS).document(id);
         DocumentSnapshot before = FirestoreSupport.await(order.get());
         requireOwned(before, shopId);
+        if (isPaidOnlineForStoredLink(before)) return mapOrder(before);
         if (!"PENDING".equals(paymentStatus(before))) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending online payment.");
-        PayMongoGateway.VerifiedPayment verified = gateway().findPaidPayment(before.getString("paymentLinkId"));
+        String linkId = before.getString("paymentLinkId");
+        PayMongoGateway.VerifiedPayment verified = gateway().findPaidPayment(linkId);
         if (!matchesStoredPayment(before, id, verified))
             throw new ResponseStatusException(HttpStatus.CONFLICT, "PayMongo has not confirmed a payment matching this order and amount.");
         String paymentRecordId = before.getString("paymentRecordId");
@@ -424,7 +448,9 @@ public class ShopOrderService {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             requireActiveShop(shopSnapshot); requireOwned(current, shopId);
-            if (!"PENDING".equals(paymentStatus(current)) || !java.util.Objects.equals(before.getString("paymentLinkId"), current.getString("paymentLinkId"))
+            if (isPaidOnlineForStoredLink(current) && java.util.Objects.equals(linkId, current.getString("paymentLinkId")))
+                return mapOrder(current);
+            if (!"PENDING".equals(paymentStatus(current)) || !java.util.Objects.equals(linkId, current.getString("paymentLinkId"))
                     || !matchesStoredPayment(current, id, verified))
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment changed before confirmation. Refresh the order.");
             Map<String, Object> update = new HashMap<>();
@@ -437,6 +463,68 @@ public class ShopOrderService {
                     "status", "PAID", "externalPaymentId", verified.id(), "paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
                     "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             return withPayment(mapOrder(current), "PAID", "ONLINE", paidAt, "PAYMONGO", "PayMongo");
+        });
+    }
+
+    /** Provider-confirmed path used only after a signed PayMongo webhook has been durably recorded. */
+    public void confirmOnlinePaymentByLink(String linkId) {
+        if (linkId == null || !linkId.matches("[A-Za-z0-9_-]{5,100}"))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid PayMongo payment link reference.");
+        Firestore db = firebase.firestore();
+        QuerySnapshot orderRows = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("paymentLinkId", linkId).limit(2).get());
+        DocumentSnapshot before = orderRows.getDocuments().isEmpty() ? null : orderRows.getDocuments().get(0);
+        DocumentSnapshot linkedPayment = null;
+        if (before == null) {
+            QuerySnapshot paymentRows = FirestoreSupport.await(db.collection(PAYMENTS).whereEqualTo("paymentLinkId", linkId).limit(2).get());
+            if (paymentRows.getDocuments().isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment link is not associated with an order.");
+            linkedPayment = paymentRows.getDocuments().get(0);
+            String linkedOrderId = linkedPayment.getString("orderId");
+            if (linkedOrderId == null || linkedOrderId.isBlank()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment link is not associated with an order.");
+            before = FirestoreSupport.await(db.collection(ORDERS).document(linkedOrderId).get());
+        }
+        if (!before.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
+        String id = before.getId();
+        String shopId = before.getString("shopId");
+        if (shopId == null || shopId.isBlank()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
+        if (isPaidOnlineForStoredLink(before) && linkId.equals(before.getString("paymentLinkId"))) return;
+
+        String paymentRecordId = before.getString("paymentRecordId");
+        DocumentReference paymentRef = paymentRecordId != null ? db.collection(PAYMENTS).document(paymentRecordId)
+                : linkedPayment != null ? db.collection(PAYMENTS).document(linkedPayment.getId()) : null;
+        DocumentSnapshot payment = linkedPayment != null ? linkedPayment
+                : paymentRef == null ? null : FirestoreSupport.await(paymentRef.get());
+        PayMongoGateway.VerifiedPayment verified = gateway().findPaidPayment(linkId);
+        if (!matchesStoredPayment(before, id, verified) && !matchesPaymentRecord(payment, id, linkId, verified))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "PayMongo has not confirmed a payment matching the stored order and amount.");
+
+        DocumentReference orderRef = db.collection(ORDERS).document(id);
+        FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(orderRef));
+            if (!current.exists() || !shopId.equals(current.getString("shopId")))
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
+            if (isPaidOnlineForStoredLink(current) && linkId.equals(current.getString("paymentLinkId"))) return null;
+            if ("PENDING".equals(paymentStatus(current)) && linkId.equals(current.getString("paymentLinkId"))
+                    && matchesStoredPayment(current, id, verified)) {
+                Map<String, Object> update = new HashMap<>();
+                update.put("paymentStatus", "PAID"); update.put("paymentMethod", "ONLINE");
+                update.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                update.put("paidByUid", "PAYMONGO"); update.put("paidByName", "PayMongo");
+                update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                tx.update(orderRef, update);
+                if (paymentRef != null) tx.update(paymentRef, Map.of("status", "PAID", "externalPaymentId", verified.id(),
+                        "paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
+                        "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+                return null;
+            }
+            if (paymentRef != null && matchesPaymentRecord(payment, id, linkId, verified)) {
+                tx.update(paymentRef, Map.of("status", "RECONCILIATION_REQUIRED", "externalPaymentId", verified.id(),
+                        "reconciliationReason", "PROVIDER_PAYMENT_AFTER_CASH_OR_CANCELLATION",
+                        "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+                tx.update(orderRef, Map.of("paymentReconciliationRequired", true,
+                        "paymentReconciliationUpdatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+                return null;
+            }
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The stored payment changed before provider confirmation.");
         });
     }
 
@@ -454,6 +542,11 @@ public class ShopOrderService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment was completed and cannot be cancelled.");
         }
         gateway().archivePaymentLink(linkId);
+        PayMongoGateway.VerifiedPayment afterArchive = gateway().findPaidPayment(linkId);
+        if (matchesStoredPayment(FirestoreSupport.await(order.get()), id, afterArchive)) {
+            confirmOnlinePayment(principal, id);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment completed while the link was being cancelled.");
+        }
         String recordId = before.getString("paymentRecordId");
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop)); DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
@@ -477,6 +570,7 @@ public class ShopOrderService {
         DocumentReference history = db.collection(HISTORY).document();
         String changedBy = userId(principal);
         String changedByName = displayName(principal);
+        String notificationCorrelationId = UUID.randomUUID().toString();
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
@@ -499,6 +593,7 @@ public class ShopOrderService {
                 DocumentReference notification = db.collection("notificationOutbox").document(id + "_READY");
                 Map<String, Object> event = new HashMap<>();
                 event.put("eventId", id + "_READY"); event.put("eventType", "READY");
+                event.put("correlationId", notificationCorrelationId);
                 event.put("shopId", shopId); event.put("orderId", id);
                 event.put("customerUserId", current.getString("customerUserId"));
                 event.put("status", "PENDING"); event.put("attempts", 0);
@@ -525,7 +620,8 @@ public class ShopOrderService {
 
     private static Map<String, Object> priceHistoryValues(BigDecimal previousPrice, BigDecimal newPrice, String uid, String name) {
         Map<String, Object> values = new HashMap<>();
-        values.put("previousPrice", previousPrice); values.put("newPrice", newPrice);
+        values.put("previousPrice", previousPrice == null ? null : Money.toCentavos(previousPrice));
+        values.put("newPrice", Money.toCentavos(newPrice)); values.put("priceUnit", "CENTAVOS");
         values.put("changedByUid", uid); values.put("changedByName", name);
         values.put("changedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
         return values;
@@ -534,7 +630,7 @@ public class ShopOrderService {
     private static Map<String, Object> paymentRecord(String shopId, String orderId, BigDecimal amount, String method,
             String status, String actorUid, String actorName, String linkId) {
         Map<String, Object> values = new HashMap<>();
-        values.put("shopId", shopId); values.put("orderId", orderId); values.put("amount", amount);
+        values.put("shopId", shopId); values.put("orderId", orderId); values.put("amountCentavos", Money.toCentavos(amount));
         values.put("method", method); values.put("status", status); values.put("createdByUid", actorUid);
         values.put("createdByName", actorName); values.put("paymentLinkId", linkId);
         values.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
@@ -558,21 +654,21 @@ public class ShopOrderService {
             if (shop.exists() && shop.getString("name") != null && !shop.getString("name").isBlank()) shopName = shop.getString("name");
         }
         return new CustomerOrderSummary(order.getId(), order.getString("orderCode"), shopName,
-                order.getString("serviceName"), decimal(order.get("kilos")), decimal(order.get("totalPrice")),
+                order.getString("serviceName"), orderQuantity(order), orderPrice(order),
                 parseStage(order.getString("stage")), paymentStatus(order), order.getString("paymentMethod"),
-                instant(order.get("paidAt")), instant(order.get("createdAt")));
+                instant(order.get("paidAt")), instant(order.get("createdAt")), orderUnit(order));
     }
 
     private static OrderSummary mapOrder(DocumentSnapshot snapshot) {
         String name = snapshot.getString("customerName");
         return new OrderSummary(snapshot.getId(), snapshot.getString("shopId"), snapshot.getString("orderCode"),
                 name == null ? "" : name, snapshot.getString("mobile"), snapshot.getString("customerUserId"),
-                snapshot.getString("serviceId"), snapshot.getString("serviceName"), decimal(snapshot.get("kilos")),
-                decimal(snapshot.get("totalPrice")), snapshot.getString("notes"), parseStage(snapshot.getString("stage")),
+                snapshot.getString("serviceId"), snapshot.getString("serviceName"), orderQuantity(snapshot),
+                orderPrice(snapshot), snapshot.getString("notes"), parseStage(snapshot.getString("stage")),
                 instant(snapshot.get("createdAt")), snapshot.getString("createdBy"), paymentStatus(snapshot),
                 snapshot.getString("paymentMethod"), instant(snapshot.get("paidAt")), snapshot.getString("paidByUid"),
                 snapshot.getString("paidByName"), snapshot.getString("paymentLinkId"), snapshot.getString("paymentLinkUrl"),
-                snapshot.getLong("paymentAmountCentavos"), snapshot.getString("paymentOrderIdReference"));
+                snapshot.getLong("paymentAmountCentavos"), snapshot.getString("paymentOrderIdReference"), orderUnit(snapshot));
     }
 
     private static StageHistory mapHistory(DocumentSnapshot snapshot) {
@@ -580,14 +676,16 @@ public class ShopOrderService {
                 snapshot.getString("changedByName"), instant(snapshot.get("changedAt")));
     }
     private static PriceHistory mapPriceHistory(DocumentSnapshot snapshot) {
-        return new PriceHistory(snapshot.getId(), nullableDecimal(snapshot.get("previousPrice")), decimal(snapshot.get("newPrice")),
+        String unit = snapshot.getString("priceUnit");
+        return new PriceHistory(snapshot.getId(), Money.fromPriceLog(unit, snapshot.get("previousPrice")),
+                Money.fromPriceLog(unit, snapshot.get("newPrice")),
                 snapshot.getString("changedByUid"), snapshot.getString("changedByName"), instant(snapshot.get("changedAt")));
     }
     private static OrderSummary replaceStage(OrderSummary order, LaundryStage stage) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), stage, order.createdAt(), order.createdBy(),
                 order.paymentStatus(), order.paymentMethod(), order.paidAt(), order.paidByUid(), order.paidByName(), order.paymentLinkId(),
-                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference());
+                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit());
     }
     private static OrderSummary replacePrice(OrderSummary order, BigDecimal price) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
@@ -604,7 +702,7 @@ public class ShopOrderService {
     private static OrderSummary withLink(OrderSummary order, String linkId, String url, long amount, String orderReference) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
-                order.createdBy(), "PENDING", "ONLINE", order.paidAt(), order.paidByUid(), order.paidByName(), linkId, url, amount, orderReference);
+                order.createdBy(), "PENDING", "ONLINE", order.paidAt(), order.paidByUid(), order.paidByName(), linkId, url, amount, orderReference, order.unit());
     }
     private static OrderSummary mapOrderAfterPaymentReset(DocumentSnapshot current) {
         OrderSummary order = mapOrder(current);
@@ -616,10 +714,19 @@ public class ShopOrderService {
         if (payment == null || !"PENDING".equals(paymentStatus(order))) return false;
         Long amount = order.getLong("paymentAmountCentavos");
         String reference = order.getString("paymentOrderIdReference");
-        long orderTotal = decimal(order.get("totalPrice")).movePointRight(2).longValue();
+        long orderTotal = Money.toCentavos(orderPrice(order));
         return ("paid".equalsIgnoreCase(payment.status()) || "succeeded".equalsIgnoreCase(payment.status()))
                 && amount != null && amount.longValue() == payment.amountCentavos() && amount.longValue() == orderTotal
                 && orderId.equals(reference) && orderId.equals(payment.orderIdReference());
+    }
+    private static boolean matchesPaymentRecord(DocumentSnapshot record, String orderId, String linkId,
+            PayMongoGateway.VerifiedPayment payment) {
+        if (record == null || !record.exists() || payment == null || !linkId.equals(record.getString("paymentLinkId"))) return false;
+        Long amount = record.getLong("amountCentavos");
+        if (amount == null) amount = Money.toCentavos(Money.fromFirestore(null, record.get("amount")));
+        return orderId.equals(record.getString("orderId")) && amount.longValue() == payment.amountCentavos()
+                && orderId.equals(payment.orderIdReference())
+                && ("paid".equalsIgnoreCase(payment.status()) || "succeeded".equalsIgnoreCase(payment.status()));
     }
     private PayMongoGateway gateway() {
         if (payMongo == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
@@ -628,6 +735,27 @@ public class ShopOrderService {
     }
     private static boolean isPaid(DocumentSnapshot order) { return "PAID".equals(order.getString("paymentStatus")); }
     private static boolean isPaymentLocked(DocumentSnapshot order) { return "PAID".equals(paymentStatus(order)) || "PENDING".equals(paymentStatus(order)); }
+    private static BigDecimal orderQuantity(DocumentSnapshot order) {
+        Object quantity = order.get("quantity");
+        return decimal(quantity == null ? order.get("kilos") : quantity);
+    }
+    private static String orderUnit(DocumentSnapshot order) {
+        String unit = order.getString("unit");
+        return unit == null || unit.isBlank() ? "kg" : unit;
+    }
+    private static String serviceUnit(DocumentSnapshot service) {
+        String unit = service.getString("unit");
+        if (unit == null || !List.of("kg", "piece", "load").contains(unit))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service has an invalid unit. Update the service before creating an order.");
+        return unit;
+    }
+    private static BigDecimal orderPrice(DocumentSnapshot order) {
+        return Money.fromFirestore(order.get("totalPriceCentavos"), order.get("totalPrice"));
+    }
+    private static boolean isPaidOnlineForStoredLink(DocumentSnapshot order) {
+        return "PAID".equals(paymentStatus(order)) && "ONLINE".equals(order.getString("paymentMethod"))
+                && order.getString("paymentLinkId") != null && !order.getString("paymentLinkId").isBlank();
+    }
     private static String paymentStatus(DocumentSnapshot order) {
         String status = order.getString("paymentStatus");
         return "PAID".equals(status) || "PENDING".equals(status) ? status : "UNPAID";

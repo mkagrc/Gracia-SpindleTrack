@@ -20,6 +20,8 @@ import org.springframework.web.server.ResponseStatusException;
 public class RegistrationRateLimitService {
     private static final long ORDER_LOOKUP_WINDOW_SECONDS = 15 * 60L;
     private static final long ORDER_LOOKUP_MAX_ATTEMPTS = 5L;
+    private static final long SHOP_DIRECTORY_WINDOW_SECONDS = 60L;
+    private static final long SHOP_DIRECTORY_MAX_ATTEMPTS = 60L;
     private final FirebaseAdminTokenVerifier firebase;
 
     public RegistrationRateLimitService(FirebaseAdminTokenVerifier firebase) {
@@ -46,24 +48,38 @@ public class RegistrationRateLimitService {
         return recordPublicOrderLookupAttempt(remoteAddress, Instant.now());
     }
 
+    public void recordPublicShopDirectoryAttempt(String remoteAddress) {
+        recordSlidingWindow(remoteAddress, "shopDirectory",
+                SHOP_DIRECTORY_WINDOW_SECONDS, SHOP_DIRECTORY_MAX_ATTEMPTS,
+                "Too many requests. Please slow down and try again.",
+                Instant.now());
+    }
+
     int recordPublicOrderLookupAttempt(String remoteAddress, Instant now) {
+        return recordSlidingWindow(remoteAddress, "orderLookup",
+                ORDER_LOOKUP_WINDOW_SECONDS, ORDER_LOOKUP_MAX_ATTEMPTS,
+                "Too many order lookup attempts. Please wait 15 minutes and try again.",
+                now);
+    }
+
+    private int recordSlidingWindow(String remoteAddress, String prefix,
+            long windowSeconds, long maxAttempts, String errorMessage, Instant now) {
         String ipHash = hashAddress(remoteAddress == null ? "unknown" : remoteAddress);
         long nowEpoch = now.getEpochSecond();
         Firestore db = firebase.firestore();
-        DocumentReference ref = db.collection("shopRegistrationRateLimits").document("orderLookup_" + ipHash);
+        DocumentReference ref = db.collection("shopRegistrationRateLimits").document(prefix + "_" + ipHash);
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot current = FirestoreSupport.await(tx.get(ref));
             Long previousStart = current.exists() ? current.getLong("windowStartEpoch") : null;
             Long previousCount = current.exists() ? current.getLong("attemptCount") : null;
             long windowStart = previousStart == null ? nowEpoch : previousStart;
             long count = previousCount == null ? 0L : previousCount;
-            if (nowEpoch < windowStart || nowEpoch - windowStart >= ORDER_LOOKUP_WINDOW_SECONDS) {
+            if (nowEpoch < windowStart || nowEpoch - windowStart >= windowSeconds) {
                 windowStart = nowEpoch;
                 count = 0L;
             }
-            if (count >= ORDER_LOOKUP_MAX_ATTEMPTS) {
-                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
-                        "Too many order lookup attempts. Please wait 15 minutes and try again.");
+            if (count >= maxAttempts) {
+                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, errorMessage);
             }
             long nextCount = count + 1L;
             tx.set(ref, Map.of("ipHash", ipHash, "windowStartEpoch", windowStart, "attemptCount", nextCount,
