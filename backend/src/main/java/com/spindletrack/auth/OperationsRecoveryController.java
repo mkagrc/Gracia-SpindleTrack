@@ -13,24 +13,15 @@ import org.springframework.web.bind.annotation.RestController;
 @PreAuthorize("hasRole('PLATFORM_ADMIN')")
 public class OperationsRecoveryController {
     private final OrderNotificationDispatcher notifications;
-    private final PayMongoWebhookService webhooks;
 
-    public OperationsRecoveryController(OrderNotificationDispatcher notifications, PayMongoWebhookService webhooks) {
+    public OperationsRecoveryController(OrderNotificationDispatcher notifications) {
         this.notifications = notifications;
-        this.webhooks = webhooks;
     }
 
     @PostMapping("/email-outbox/{eventId}/retry")
     public ResponseEntity<Void> retryEmail(@PathVariable String eventId,
             @AuthenticationPrincipal FirebasePrincipal principal) {
         notifications.retryDeadLetter(principal, eventId);
-        return ResponseEntity.noContent().build();
-    }
-
-    @PostMapping("/paymongo-webhooks/{eventId}/retry")
-    public ResponseEntity<Void> retryPaymentWebhook(@PathVariable String eventId,
-            @AuthenticationPrincipal FirebasePrincipal principal) {
-        webhooks.retryDeadLetter(principal, eventId);
         return ResponseEntity.noContent().build();
     }
 }

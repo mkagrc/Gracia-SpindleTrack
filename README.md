@@ -68,3 +68,17 @@ After setting `FILE_STORAGE_PATH` in the real `backend/.env` and starting both a
 8. Confirm an owner, staff member, platform administrator, or customer with attached orders cannot register another shop. Confirm the per-IP daily rate limit rejects further attempts after three.
 
 V1 and V2 remain immutable. V3 adds tenancy and an active demo shop; V4 adds durable rate-limit counters; V5 enforces verification-document size and content-type constraints. Existing demo users have no Firebase UIDs and cannot sign in.
+
+## Online Payments (PayPal Sandbox)
+
+Online payments use PayPal Orders v2 in Sandbox mode (`PHP` currency, `CAPTURE` intent). Configure these server-side environment variables in `backend/.env` (never in frontend files):
+
+```dotenv
+PAYPAL_CLIENT_ID=your-sandbox-client-id
+PAYPAL_CLIENT_SECRET=your-sandbox-client-secret
+PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
+PAYPAL_RETURN_URL=http://localhost:5173/paypal/return
+PAYPAL_CANCEL_URL=http://localhost:5173/paypal/cancel
+```
+
+`PAYPAL_RETURN_URL` and `PAYPAL_CANCEL_URL` default to `${FRONTEND_BASE_URL}/paypal/return` and `${FRONTEND_BASE_URL}/paypal/cancel` when omitted. Legacy PayMongo endpoints/webhooks have been removed; existing historical `PAYMONGO` order records remain readable in the UI as `Online payment (PayMongo, legacy)`.

@@ -23,6 +23,7 @@ import { OwnerAddOnsPage, OwnerServicesPage } from './OwnerCatalogPages.jsx';
 import { OwnerDashboardMetrics, OwnerReportsPage, OwnerUnclaimedPage } from './OwnerOperationsPages.jsx';
 import PublicOrderLookupPage from './PublicOrderLookupPage.jsx';
 import PublicShopsPage from './PublicShopsPage.jsx';
+import PayPalReturnPage from './PayPalReturnPage.jsx';
 import { postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
 import { CEBU_MUNICIPALITIES, DEFAULT_PROVINCE } from './cebuMunicipalities.js';
 
@@ -748,6 +749,8 @@ function AppRoutes() {
     <Route path="/staff/orders" element={<RoleGuard roles={['STAFF']}><OrdersListPage /></RoleGuard>} />
     <Route path="/staff/orders/:orderId" element={<RoleGuard roles={['STAFF']}><OrderDetailPage /></RoleGuard>} />
     <Route path="/staff/unclaimed" element={<RoleGuard roles={['STAFF']}><OwnerUnclaimedPage staff /></RoleGuard>} />
+    <Route path="/paypal/return" element={<RoleGuard roles={['STAFF']}><PayPalReturnPage mode="return" /></RoleGuard>} />
+    <Route path="/paypal/cancel" element={<RoleGuard roles={['STAFF']}><PayPalReturnPage mode="cancel" /></RoleGuard>} />
     <Route path="/admin/shops" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopsPage /></RoleGuard>} />
     <Route path="/admin/shops/:id" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopDetailPage /></RoleGuard>} />
     <Route path="/admin/users" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminUsersPage /></RoleGuard>} />

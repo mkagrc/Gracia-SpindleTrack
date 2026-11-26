@@ -57,8 +57,18 @@ export function formatDate(value) {
 export function formatPaymentMethod(value) {
   const normalized = String(value || '').trim().toUpperCase();
   if (normalized === 'CASH') return 'Cash';
-  if (normalized === 'ONLINE' || normalized === 'PAYMONGO') return 'Online payment (PayMongo)';
+  if (normalized === 'PAYMONGO') return 'Online payment (PayMongo, legacy)';
+  if (normalized === 'ONLINE' || normalized === 'PAYPAL') return 'Online payment (PayPal)';
   return 'Not specified';
+}
+
+export function formatOrderPaymentMethod(order, explicitMethod = null) {
+  const raw = explicitMethod ?? order?.paymentMethod;
+  const normalized = String(raw || '').trim().toUpperCase();
+  if (normalized === 'ONLINE' && String(order?.paidByUid || '').trim().toUpperCase() === 'PAYMONGO') {
+    return formatPaymentMethod('PAYMONGO');
+  }
+  return formatPaymentMethod(raw);
 }
 
 export function formatPaymentTiming(value) {

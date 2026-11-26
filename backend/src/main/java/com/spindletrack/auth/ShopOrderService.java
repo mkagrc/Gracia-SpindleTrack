@@ -2,6 +2,7 @@ package com.spindletrack.auth;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -45,16 +46,17 @@ public class ShopOrderService {
     private static final int PAGE_SIZE = 20;
     private static final BigDecimal MAX_KILOS = new BigDecimal("999.99");
     private static final BigDecimal MAX_PRICE = new BigDecimal("999999.99");
+    static final Duration PAYMENT_LOCK_LEASE = Duration.ofSeconds(60);
     private final FirebaseAdminTokenVerifier firebase;
-    private final PayMongoGateway payMongo;
+    private final PayPalGateway payPal;
     private final UserAccountRepository userAccounts;
 
     public ShopOrderService(FirebaseAdminTokenVerifier firebase) { this(firebase, null, null); }
-    public ShopOrderService(FirebaseAdminTokenVerifier firebase, PayMongoGateway payMongo) { this(firebase, payMongo, null); }
+    public ShopOrderService(FirebaseAdminTokenVerifier firebase, PayPalGateway payPal) { this(firebase, payPal, null); }
     @Autowired
-    public ShopOrderService(FirebaseAdminTokenVerifier firebase, PayMongoGateway payMongo, UserAccountRepository userAccounts) {
+    public ShopOrderService(FirebaseAdminTokenVerifier firebase, PayPalGateway payPal, UserAccountRepository userAccounts) {
         this.firebase = firebase;
-        this.payMongo = payMongo;
+        this.payPal = payPal;
         this.userAccounts = userAccounts;
     }
 
@@ -90,6 +92,10 @@ public class ShopOrderService {
     public record ExpectedStageRequest(@NotBlank(message = "The current stage is required.") String expectedStage,
             @NotBlank(message = "A client request UUID is required.") String clientRequestId) {}
     public record PaymentLinkRequest(@NotBlank(message = "A client request UUID is required.") String clientRequestId) {}
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PayPalOrderRequest(String clientRequestId) {}
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PayPalCaptureRequest(String paypalOrderId) {}
     public record OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
             String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
             String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
@@ -136,7 +142,10 @@ public class ShopOrderService {
                     null, null, null, null, "kg", "CASH", "PAY_NOW");
         }
     }
-    public record PaymentLinkResult(OrderSummary order, String paymentLinkId, String paymentLinkUrl) {}
+    public record PayPalOrderResult(OrderSummary order, String paypalOrderId, String approvalUrl) {
+        @JsonProperty("paymentLinkId") public String paymentLinkId() { return paypalOrderId; }
+        @JsonProperty("paymentLinkUrl") public String paymentLinkUrl() { return approvalUrl; }
+    }
     public record StageHistory(String id, LaundryStage stage, String changedBy, String changedByName, Instant changedAt) {}
     public record PriceHistory(String id, BigDecimal previousPrice, BigDecimal newPrice, String changedByUid,
             String changedByName, Instant changedAt) {}
@@ -231,7 +240,7 @@ public class ShopOrderService {
         List<CustomerPaymentEvent> payments = new ArrayList<>();
         for (DocumentSnapshot row : paymentRows.getDocuments()) {
             String status = row.getString("status");
-            String method = row.getString("method");
+            String method = resolvedPaymentEventMethod(row);
             if (status != null && method != null) payments.add(new CustomerPaymentEvent(status, method,
                     instant("PAID".equals(status) ? row.get("updatedAt") : row.get("createdAt"))));
         }
@@ -534,18 +543,6 @@ public class ShopOrderService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for online payment.");
         requirePaymentTiming(before);
         String pendingLinkId = "PENDING".equals(paymentStatus(before)) ? before.getString("paymentLinkId") : null;
-        if (pendingLinkId != null && !pendingLinkId.isBlank()) {
-            PayMongoGateway.VerifiedPayment alreadyPaid = gateway().findPaidPayment(pendingLinkId);
-            if (matchesStoredPayment(before, id, alreadyPaid)) {
-                confirmOnlinePayment(principal, id);
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid online.");
-            }
-            gateway().archivePaymentLink(pendingLinkId);
-            if (matchesStoredPayment(FirestoreSupport.await(order.get()), id, gateway().findPaidPayment(pendingLinkId))) {
-                confirmOnlinePayment(principal, id);
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order was paid online before cash payment could be recorded.");
-            }
-        }
         OrderSummary result = FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
@@ -561,7 +558,7 @@ public class ShopOrderService {
             requirePaymentTiming(current);
             if (existingCashPayment.exists()) throw new ResponseStatusException(HttpStatus.CONFLICT, "A cash payment record already exists for this unpaid order; reconcile it before retrying.");
             if ("PENDING".equals(paymentStatus(current)) && !java.util.Objects.equals(pendingLinkId, current.getString("paymentLinkId")))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "The payment link changed. Refresh the order and try again.");
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending online payment changed. Refresh the order and try again.");
             Map<String, Object> update = new HashMap<>();
             update.put("paymentStatus", "PAID");
             update.put("paymentMethod", "CASH");
@@ -580,56 +577,83 @@ public class ShopOrderService {
         return result;
     }
 
-    public PaymentLinkResult createPaymentLink(FirebasePrincipal principal, String orderId, PaymentLinkRequest request) {
+    public PayPalOrderResult createPayPalOrder(FirebasePrincipal principal, String orderId, PayPalOrderRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
         String id = requireId(orderId);
-        String clientRequestId = validateClientRequestId(request == null ? null : request.clientRequestId());
+        String rawRequestId = request == null ? null : request.clientRequestId();
+        String clientRequestId = rawRequestId == null || rawRequestId.isBlank()
+                ? UUID.randomUUID().toString()
+                : validateClientRequestId(rawRequestId);
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
         var requestCollection = order.collection("paymentLinkRequests");
         DocumentReference requestKey = requestCollection == null ? null : requestCollection.document(clientRequestId);
-        PaymentLinkResult replay = FirestoreSupport.transact(db, tx -> {
+        Instant now = Instant.now();
+        PayPalOrderResult replay = FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
             requireActiveShop(shopSnapshot);
             requireOwned(current, shopId);
             if (requestSnapshot != null && requestSnapshot.exists()) {
-                if ("COMPLETED".equals(requestSnapshot.getString("status")))
-                    return new PaymentLinkResult(mapOrder(current), requestSnapshot.getString("paymentLinkId"), requestSnapshot.getString("paymentLinkUrl"));
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment-link request is already being processed. Refresh before retrying.");
+                String reqStatus = requestSnapshot.getString("status");
+                if ("COMPLETED".equals(reqStatus)) {
+                    String cachedId = firstNonBlank(requestSnapshot.getString("paypalOrderId"), requestSnapshot.getString("paymentLinkId"));
+                    String cachedUrl = firstNonBlank(requestSnapshot.getString("approvalUrl"), requestSnapshot.getString("paymentLinkUrl"));
+                    return new PayPalOrderResult(mapOrder(current), cachedId, cachedUrl);
+                }
+                if ("CREATING".equals(reqStatus) && !isLockExpired(requestSnapshot, now)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "This PayPal payment request is already being processed. Wait a moment and retry.");
+                }
+                // Expired CREATING lease or FAILED lock may be retried safely.
             }
             if ("PENDING".equals(paymentStatus(current))) {
-                String existingId = current.getString("paymentLinkId");
+                String existingId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
                 String existingUrl = current.getString("paymentLinkUrl");
-                if (existingId != null && existingUrl != null) return new PaymentLinkResult(mapOrder(current), existingId, existingUrl);
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment link needs reconciliation.");
+                if (!existingId.isBlank() && existingUrl != null && !existingUrl.isBlank()
+                        && !"PAYMONGO".equalsIgnoreCase(resolvedPaymentMethod(current))) {
+                    return new PayPalOrderResult(mapOrder(current), existingId, existingUrl);
+                }
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "This order already has a pending payment. Cancel it before creating a new PayPal order.");
             }
             if (!"UNPAID".equals(paymentStatus(current)))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "A payment link can be created only for an unpaid order.");
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "A PayPal order can be created only for an unpaid order.");
             if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for cash payment.");
             requirePaymentTiming(current);
             long cents = Money.toCentavos(orderPrice(current));
-            if (cents < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayMongo payment links require a total of at least ₱1.00.");
-            if (requestKey != null) tx.create(requestKey, Map.of("shopId", shopId, "orderId", id, "status", "CREATING",
-                    "amountCentavos", cents, "createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            if (cents < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayPal payments require a total of at least ₱1.00.");
+            if (requestKey != null) {
+                Map<String, Object> lockData = new HashMap<>();
+                lockData.put("shopId", shopId);
+                lockData.put("orderId", id);
+                lockData.put("status", "CREATING");
+                lockData.put("amountCentavos", cents);
+                lockData.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                lockData.put("expiresAt", java.util.Date.from(now.plus(PAYMENT_LOCK_LEASE)));
+                tx.set(requestKey, lockData);
+            }
             return null;
         });
         if (replay != null) return replay;
-        DocumentSnapshot initialOrder = FirestoreSupport.await(order.get());
-        BigDecimal total = orderPrice(initialOrder);
-        long amountCentavos = Money.toCentavos(total);
-        PayMongoGateway.CreatedLink link = gateway().createPaymentLink(amountCentavos, id, initialOrder.getString("orderCode"));
-        if (link.amountCentavos() != amountCentavos || !"PHP".equals(link.currency())) {
-            try { gateway().archivePaymentLink(link.id()); } catch (RuntimeException ignored) { }
-            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "PayMongo returned a link with an unexpected amount or currency.");
-        }
-        DocumentReference payment = db.collection(PAYMENTS).document("online-" + clientRequestId);
-        String paymentRecordId = payment.getId();
+
         try {
+            DocumentSnapshot initialOrder = FirestoreSupport.await(order.get());
+            BigDecimal total = orderPrice(initialOrder);
+            long amountCentavos = Money.toCentavos(total);
+            PayPalGateway.CreatedOrder created = gateway().createOrder(total, id, initialOrder.getString("orderCode"));
+            if (created == null || created.id() == null || created.id().isBlank()
+                    || created.approvalUrl() == null || created.approvalUrl().isBlank()
+                    || created.amount() == null || Money.toCentavos(created.amount()) != amountCentavos
+                    || !"PHP".equalsIgnoreCase(created.currency())) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "PayPal returned an order with an unexpected amount, currency, or approval URL.");
+            }
+            DocumentReference payment = db.collection(PAYMENTS).document("online-" + clientRequestId);
+            String paymentRecordId = payment.getId();
             OrderSummary updated = FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
@@ -638,133 +662,132 @@ public class ShopOrderService {
                 requireOwned(current, shopId);
                 if (requestSnapshot != null && requestSnapshot.exists() && "COMPLETED".equals(requestSnapshot.getString("status")))
                     return mapOrder(current);
-                if (!"ONLINE".equals(paymentMethodPreference(current)))
+                if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is no longer configured for online payment.");
                 requirePaymentTiming(current);
                 if (!"UNPAID".equals(paymentStatus(current)) || orderPrice(current).compareTo(total) != 0)
-                    throw new ResponseStatusException(HttpStatus.CONFLICT, "The order changed before its payment link was created. Refresh and try again.");
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "The order changed before its PayPal order was created. Refresh and try again.");
                 Map<String, Object> values = new HashMap<>();
-                values.put("paymentStatus", "PENDING"); values.put("paymentMethod", "ONLINE");
-                values.put("paymentLinkId", link.id()); values.put("paymentLinkUrl", link.url());
-                values.put("paymentAmountCentavos", amountCentavos); values.put("paymentOrderIdReference", id);
+                values.put("paymentStatus", "PENDING");
+                values.put("paymentMethod", "PAYPAL");
+                values.put("paypalOrderId", created.id());
+                values.put("paymentLinkId", created.id());
+                values.put("paymentLinkUrl", created.approvalUrl());
+                values.put("paymentAmountCentavos", amountCentavos);
+                values.put("paymentOrderIdReference", id);
                 values.put("paymentRecordId", paymentRecordId);
                 values.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
                 tx.update(order, values);
-                if (requestKey != null) tx.update(requestKey, Map.of("status", "COMPLETED", "paymentLinkId", link.id(), "paymentLinkUrl", link.url(),
-                        "completedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-                tx.create(payment, paymentRecord(shopId, id, total, "ONLINE", "PENDING", principal.uid(), displayName(principal), link.id()));
-                return withLink(mapOrder(current), link.id(), link.url(), amountCentavos, id);
+                if (requestKey != null) {
+                    Map<String, Object> completedLock = new HashMap<>();
+                    completedLock.put("status", "COMPLETED");
+                    completedLock.put("paypalOrderId", created.id());
+                    completedLock.put("approvalUrl", created.approvalUrl());
+                    completedLock.put("paymentLinkId", created.id());
+                    completedLock.put("paymentLinkUrl", created.approvalUrl());
+                    completedLock.put("completedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                    tx.update(requestKey, completedLock);
+                }
+                Map<String, Object> paymentDoc = paymentRecord(shopId, id, total, "PAYPAL", "PENDING", principal.uid(), displayName(principal), created.id());
+                paymentDoc.put("paypalOrderId", created.id());
+                paymentDoc.put("currency", "PHP");
+                paymentDoc.put("amount", total.doubleValue());
+                tx.create(payment, paymentDoc);
+                return withPayPalOrder(mapOrder(current), created.id(), created.approvalUrl(), amountCentavos, id);
             });
-            return new PaymentLinkResult(updated, link.id(), link.url());
+            return new PayPalOrderResult(updated, created.id(), created.approvalUrl());
         } catch (RuntimeException exception) {
-            try { gateway().archivePaymentLink(link.id()); } catch (RuntimeException ignored) { }
+            releasePaymentRequestLock(requestKey);
             throw exception;
         }
     }
 
-    /** Compatibility entry point for older in-process callers; HTTP callers must provide a request UUID. */
-    public PaymentLinkResult createPaymentLink(FirebasePrincipal principal, String orderId) {
-        return createPaymentLink(principal, orderId, new PaymentLinkRequest(UUID.randomUUID().toString()));
+    /** Convenience overload for in-process callers. */
+    public PayPalOrderResult createPayPalOrder(FirebasePrincipal principal, String orderId) {
+        return createPayPalOrder(principal, orderId, new PayPalOrderRequest(UUID.randomUUID().toString()));
     }
 
-    public OrderSummary confirmOnlinePayment(FirebasePrincipal principal, String orderId) {
+    public OrderSummary capturePayPalOrder(FirebasePrincipal principal, String orderId, PayPalCaptureRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
         String id = requireId(orderId);
+        String requestedPaypalOrderId = request == null || request.paypalOrderId() == null || request.paypalOrderId().isBlank()
+                ? null : request.paypalOrderId().trim();
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
         DocumentSnapshot before = FirestoreSupport.await(order.get());
         requireOwned(before, shopId);
-        if (isPaidOnlineForStoredLink(before)) return mapOrder(before);
-        if (!"PENDING".equals(paymentStatus(before))) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending online payment.");
-        String linkId = before.getString("paymentLinkId");
-        PayMongoGateway.VerifiedPayment verified = gateway().findPaidPayment(linkId);
-        if (!matchesStoredPayment(before, id, verified))
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "PayMongo has not confirmed a payment matching this order and amount.");
+        requireActiveShop(FirestoreSupport.await(shop.get()));
+        String storedPaypalId = firstNonBlank(before.getString("paypalOrderId"), before.getString("paymentLinkId"));
+        if (isPaid(before)) {
+            String method = resolvedPaymentMethod(before);
+            if (("PAYPAL".equalsIgnoreCase(method) || "ONLINE".equalsIgnoreCase(method))
+                    && (requestedPaypalOrderId == null || requestedPaypalOrderId.equals(storedPaypalId))) {
+                return mapOrder(before);
+            }
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
+        }
+        if (!"PENDING".equals(paymentStatus(before))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending PayPal payment.");
+        }
+        if (storedPaypalId.isBlank() || "PAYMONGO".equalsIgnoreCase(resolvedPaymentMethod(before))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This order has no PayPal order ID. Cancel the legacy pending link and start a new PayPal payment.");
+        }
+        if (requestedPaypalOrderId != null && !requestedPaypalOrderId.equals(storedPaypalId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "The PayPal order ID does not belong to this order.");
+        }
+
+        PayPalGateway.CapturedOrder captured = gateway().captureOrder(storedPaypalId);
+        if (!matchesCapturedOrder(before, storedPaypalId, captured)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "PayPal has not completed a payment matching this order's currency and total amount.");
+        }
+
         String paymentRecordId = before.getString("paymentRecordId");
         Instant paidAt = Instant.now();
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
-            requireActiveShop(shopSnapshot); requireOwned(current, shopId);
-            if (isPaidOnlineForStoredLink(current) && java.util.Objects.equals(linkId, current.getString("paymentLinkId")))
-                return mapOrder(current);
-            if (!"PENDING".equals(paymentStatus(current)) || !java.util.Objects.equals(linkId, current.getString("paymentLinkId"))
-                    || !matchesStoredPayment(current, id, verified))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment changed before confirmation. Refresh the order.");
+            requireActiveShop(shopSnapshot);
+            requireOwned(current, shopId);
+            String currentPaypalId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
+            if (isPaid(current)) {
+                String method = resolvedPaymentMethod(current);
+                if (("PAYPAL".equalsIgnoreCase(method) || "ONLINE".equalsIgnoreCase(method))
+                        && currentPaypalId.equals(storedPaypalId)) {
+                    return mapOrder(current);
+                }
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
+            }
+            if (!"PENDING".equals(paymentStatus(current)) || !storedPaypalId.equals(currentPaypalId)
+                    || !matchesCapturedOrder(current, storedPaypalId, captured)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment changed before capture. Refresh the order.");
+            }
             Map<String, Object> update = new HashMap<>();
-            update.put("paymentStatus", "PAID"); update.put("paymentMethod", "ONLINE");
+            update.put("paymentStatus", "PAID");
+            update.put("paymentMethod", "PAYPAL");
             update.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
-            update.put("paidByUid", "PAYMONGO"); update.put("paidByName", "PayMongo");
+            update.put("paidByUid", "PAYPAL");
+            update.put("paidByName", "PayPal Sandbox");
+            if (captured.captureId() != null && !captured.captureId().isBlank()) {
+                update.put("paypalCaptureId", captured.captureId());
+            }
             update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             tx.update(order, update);
-            if (paymentRecordId != null) tx.update(db.collection(PAYMENTS).document(paymentRecordId), Map.of(
-                    "status", "PAID", "externalPaymentId", verified.id(), "paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
-                    "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-            return withPayment(mapOrder(current), "PAID", "ONLINE", paidAt, "PAYMONGO", "PayMongo");
-        });
-    }
-
-    /** Provider-confirmed path used only after a signed PayMongo webhook has been durably recorded. */
-    public void confirmOnlinePaymentByLink(String linkId) {
-        if (linkId == null || !linkId.matches("[A-Za-z0-9_-]{5,100}"))
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid PayMongo payment link reference.");
-        Firestore db = firebase.firestore();
-        QuerySnapshot orderRows = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("paymentLinkId", linkId).limit(2).get());
-        DocumentSnapshot before = orderRows.getDocuments().isEmpty() ? null : orderRows.getDocuments().get(0);
-        DocumentSnapshot linkedPayment = null;
-        if (before == null) {
-            QuerySnapshot paymentRows = FirestoreSupport.await(db.collection(PAYMENTS).whereEqualTo("paymentLinkId", linkId).limit(2).get());
-            if (paymentRows.getDocuments().isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment link is not associated with an order.");
-            linkedPayment = paymentRows.getDocuments().get(0);
-            String linkedOrderId = linkedPayment.getString("orderId");
-            if (linkedOrderId == null || linkedOrderId.isBlank()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment link is not associated with an order.");
-            before = FirestoreSupport.await(db.collection(ORDERS).document(linkedOrderId).get());
-        }
-        if (!before.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
-        String id = before.getId();
-        String shopId = before.getString("shopId");
-        if (shopId == null || shopId.isBlank()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
-        if (isPaidOnlineForStoredLink(before) && linkId.equals(before.getString("paymentLinkId"))) return;
-
-        String paymentRecordId = before.getString("paymentRecordId");
-        DocumentReference paymentRef = paymentRecordId != null ? db.collection(PAYMENTS).document(paymentRecordId)
-                : linkedPayment != null ? db.collection(PAYMENTS).document(linkedPayment.getId()) : null;
-        DocumentSnapshot payment = linkedPayment != null ? linkedPayment
-                : paymentRef == null ? null : FirestoreSupport.await(paymentRef.get());
-        PayMongoGateway.VerifiedPayment verified = gateway().findPaidPayment(linkId);
-        if (!matchesStoredPayment(before, id, verified) && !matchesPaymentRecord(payment, id, linkId, verified))
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "PayMongo has not confirmed a payment matching the stored order and amount.");
-
-        DocumentReference orderRef = db.collection(ORDERS).document(id);
-        FirestoreSupport.transact(db, tx -> {
-            DocumentSnapshot current = FirestoreSupport.await(tx.get(orderRef));
-            if (!current.exists() || !shopId.equals(current.getString("shopId")))
-                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment order was not found.");
-            if (isPaidOnlineForStoredLink(current) && linkId.equals(current.getString("paymentLinkId"))) return null;
-            if ("PENDING".equals(paymentStatus(current)) && linkId.equals(current.getString("paymentLinkId"))
-                    && matchesStoredPayment(current, id, verified)) {
-                Map<String, Object> update = new HashMap<>();
-                update.put("paymentStatus", "PAID"); update.put("paymentMethod", "ONLINE");
-                update.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
-                update.put("paidByUid", "PAYMONGO"); update.put("paidByName", "PayMongo");
-                update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
-                tx.update(orderRef, update);
-                if (paymentRef != null) tx.update(paymentRef, Map.of("status", "PAID", "externalPaymentId", verified.id(),
-                        "paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp(),
-                        "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-                return null;
+            if (paymentRecordId != null) {
+                Map<String, Object> paymentUpdate = new HashMap<>();
+                paymentUpdate.put("status", "PAID");
+                paymentUpdate.put("method", "PAYPAL");
+                paymentUpdate.put("paypalOrderId", storedPaypalId);
+                paymentUpdate.put("externalPaymentId", captured.captureId() == null ? storedPaypalId : captured.captureId());
+                paymentUpdate.put("paidAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                paymentUpdate.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                tx.update(db.collection(PAYMENTS).document(paymentRecordId), paymentUpdate);
             }
-            if (paymentRef != null && matchesPaymentRecord(payment, id, linkId, verified)) {
-                tx.update(paymentRef, Map.of("status", "RECONCILIATION_REQUIRED", "externalPaymentId", verified.id(),
-                        "reconciliationReason", "PROVIDER_PAYMENT_AFTER_CASH_OR_CANCELLATION",
-                        "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-                tx.update(orderRef, Map.of("paymentReconciliationRequired", true,
-                        "paymentReconciliationUpdatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
-                return null;
-            }
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "The stored payment changed before provider confirmation.");
+            return withPayment(mapOrder(current), "PAID", "PAYPAL", paidAt, "PAYPAL", "PayPal Sandbox");
         });
     }
 
@@ -774,25 +797,15 @@ public class ShopOrderService {
         Firestore db = firebase.firestore(); DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
         DocumentSnapshot before = FirestoreSupport.await(order.get()); requireOwned(before, shopId);
-        if (!"PENDING".equals(paymentStatus(before))) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending payment link to cancel.");
-        String linkId = before.getString("paymentLinkId");
-        PayMongoGateway.VerifiedPayment verification = gateway().findPaidPayment(linkId);
-        if (matchesStoredPayment(before, id, verification)) {
-            confirmOnlinePayment(principal, id);
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment was completed and cannot be cancelled.");
-        }
-        gateway().archivePaymentLink(linkId);
-        PayMongoGateway.VerifiedPayment afterArchive = gateway().findPaidPayment(linkId);
-        if (matchesStoredPayment(FirestoreSupport.await(order.get()), id, afterArchive)) {
-            confirmOnlinePayment(principal, id);
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment completed while the link was being cancelled.");
-        }
+        if (!"PENDING".equals(paymentStatus(before))) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending online payment to cancel.");
+        String linkId = firstNonBlank(before.getString("paypalOrderId"), before.getString("paymentLinkId"));
         String recordId = before.getString("paymentRecordId");
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop)); DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             requireActiveShop(shopSnapshot); requireOwned(current, shopId);
-            if (!"PENDING".equals(paymentStatus(current)) || !java.util.Objects.equals(linkId, current.getString("paymentLinkId")))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "The payment link changed before cancellation. Refresh the order.");
+            String currentLinkId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
+            if (!"PENDING".equals(paymentStatus(current)) || !java.util.Objects.equals(linkId, currentLinkId))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending online payment changed before cancellation. Refresh the order.");
             Map<String, Object> update = new HashMap<>(); update.put("paymentStatus", "UNPAID"); update.put("paymentMethod", null);
             clearOnlineLink(update); update.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()); tx.update(order, update);
             if (recordId != null) tx.update(db.collection(PAYMENTS).document(recordId), Map.of("status", "CANCELLED", "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
@@ -938,7 +951,7 @@ public class ShopOrderService {
                 first(string(service.get("category")), "Other"), billingType,
                 nullableDecimal(service.get("unitPrice")), nullableDecimal(service.get("capacityKg")),
                 first(string(service.get("notes")), ""));
-        String paymentMethod = order.getString("paymentMethod");
+        String paymentMethod = resolvedPaymentMethod(order);
         if (paymentMethod == null) paymentMethod = paymentMethodPreference(order);
         return new Invoice(first(shop == null ? null : shop.getString("name"), "Laundry shop"), first(shop == null ? null : shop.getString("contactNumber"), ""),
                 order.getString("orderCode"), instant(order.get("createdAt")), order.getString("customerName"),
@@ -981,6 +994,7 @@ public class ShopOrderService {
         return values;
     }
     private static void clearOnlineLink(Map<String, Object> values) {
+        values.put("paypalOrderId", com.google.cloud.firestore.FieldValue.delete());
         values.put("paymentLinkId", com.google.cloud.firestore.FieldValue.delete());
         values.put("paymentLinkUrl", com.google.cloud.firestore.FieldValue.delete());
         values.put("paymentAmountCentavos", com.google.cloud.firestore.FieldValue.delete());
@@ -997,20 +1011,22 @@ public class ShopOrderService {
         }
         return new CustomerOrderSummary(order.getId(), order.getString("orderCode"), shopName,
                 order.getString("serviceName"), orderQuantity(order), orderPrice(order),
-                parseStage(order.getString("stage")), paymentStatus(order), order.getString("paymentMethod"),
+                parseStage(order.getString("stage")), paymentStatus(order), resolvedPaymentMethod(order),
                 instant(order.get("paidAt")), instant(order.get("createdAt")), orderUnit(order),
                 orderBillingType(order), nullableDecimal(order.get("actualWeightKg")));
     }
 
     private static OrderSummary mapOrder(DocumentSnapshot snapshot) {
         String name = snapshot.getString("customerName");
+        String linkId = first(snapshot.getString("paypalOrderId"), snapshot.getString("paymentLinkId"));
+        if (linkId.isBlank()) linkId = null;
         return new OrderSummary(snapshot.getId(), snapshot.getString("shopId"), snapshot.getString("orderCode"),
                 name == null ? "" : name, snapshot.getString("mobile"), snapshot.getString("customerUserId"),
                 snapshot.getString("serviceId"), snapshot.getString("serviceName"), orderQuantity(snapshot),
                 orderPrice(snapshot), snapshot.getString("notes"), parseStage(snapshot.getString("stage")),
                 instant(snapshot.get("createdAt")), snapshot.getString("createdBy"), paymentStatus(snapshot),
-                snapshot.getString("paymentMethod"), instant(snapshot.get("paidAt")), snapshot.getString("paidByUid"),
-                snapshot.getString("paidByName"), snapshot.getString("paymentLinkId"), snapshot.getString("paymentLinkUrl"),
+                resolvedPaymentMethod(snapshot), instant(snapshot.get("paidAt")), snapshot.getString("paidByUid"),
+                snapshot.getString("paidByName"), linkId, snapshot.getString("paymentLinkUrl"),
                 snapshot.getLong("paymentAmountCentavos"), snapshot.getString("paymentOrderIdReference"), orderUnit(snapshot),
                 paymentMethodPreference(snapshot), paymentTiming(snapshot),
                 orderBillingType(snapshot), nullableDecimal(snapshot.get("actualWeightKg")));
@@ -1047,10 +1063,10 @@ public class ShopOrderService {
                 order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit(), order.paymentMethodPreference(), order.paymentTiming(),
                 order.billingType(), order.actualWeightKg());
     }
-    private static OrderSummary withLink(OrderSummary order, String linkId, String url, long amount, String orderReference) {
+    private static OrderSummary withPayPalOrder(OrderSummary order, String paypalOrderId, String approvalUrl, long amount, String orderReference) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
-                order.createdBy(), "PENDING", "ONLINE", order.paidAt(), order.paidByUid(), order.paidByName(), linkId, url, amount,
+                order.createdBy(), "PENDING", "PAYPAL", order.paidAt(), order.paidByUid(), order.paidByName(), paypalOrderId, approvalUrl, amount,
                 orderReference, order.unit(), order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
     private static OrderSummary mapOrderAfterPaymentReset(DocumentSnapshot current) {
@@ -1060,28 +1076,54 @@ public class ShopOrderService {
                 order.createdBy(), "UNPAID", null, null, null, null, null, null, null, null, order.unit(),
                 order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
-    private static boolean matchesStoredPayment(DocumentSnapshot order, String orderId, PayMongoGateway.VerifiedPayment payment) {
-        if (payment == null || !"PENDING".equals(paymentStatus(order))) return false;
-        Long amount = order.getLong("paymentAmountCentavos");
-        String reference = order.getString("paymentOrderIdReference");
+    private static boolean matchesCapturedOrder(DocumentSnapshot order, String expectedPaypalOrderId,
+            PayPalGateway.CapturedOrder captured) {
+        if (captured == null || !"PENDING".equals(paymentStatus(order))) return false;
+        if (!"COMPLETED".equalsIgnoreCase(captured.status())) return false;
+        if (!"PHP".equalsIgnoreCase(captured.currency())) return false;
+        if (captured.id() != null && !captured.id().isBlank() && !expectedPaypalOrderId.equals(captured.id())) return false;
+        if (captured.amount() == null) return false;
         long orderTotal = Money.toCentavos(orderPrice(order));
-        return ("paid".equalsIgnoreCase(payment.status()) || "succeeded".equalsIgnoreCase(payment.status()))
-                && amount != null && amount.longValue() == payment.amountCentavos() && amount.longValue() == orderTotal
-                && orderId.equals(reference) && orderId.equals(payment.orderIdReference());
+        Long storedCentavos = order.getLong("paymentAmountCentavos");
+        long capturedCentavos = Money.toCentavos(captured.amount());
+        return capturedCentavos == orderTotal && (storedCentavos == null || storedCentavos.longValue() == capturedCentavos);
     }
-    private static boolean matchesPaymentRecord(DocumentSnapshot record, String orderId, String linkId,
-            PayMongoGateway.VerifiedPayment payment) {
-        if (record == null || !record.exists() || payment == null || !linkId.equals(record.getString("paymentLinkId"))) return false;
-        Long amount = record.getLong("amountCentavos");
-        if (amount == null) amount = Money.toCentavos(Money.fromFirestore(null, record.get("amount")));
-        return orderId.equals(record.getString("orderId")) && amount.longValue() == payment.amountCentavos()
-                && orderId.equals(payment.orderIdReference())
-                && ("paid".equalsIgnoreCase(payment.status()) || "succeeded".equalsIgnoreCase(payment.status()));
+    private static boolean isLockExpired(DocumentSnapshot lockDoc, Instant now) {
+        Instant expiresAt = instant(lockDoc.get("expiresAt"));
+        if (expiresAt != null) return now.isAfter(expiresAt);
+        Instant createdAt = instant(lockDoc.get("createdAt"));
+        if (createdAt != null) return now.isAfter(createdAt.plus(PAYMENT_LOCK_LEASE));
+        return true;
     }
-    private PayMongoGateway gateway() {
-        if (payMongo == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                "PayMongo test mode is not available in this service instance.");
-        return payMongo;
+    private static void releasePaymentRequestLock(DocumentReference requestKey) {
+        if (requestKey == null) return;
+        try {
+            FirestoreSupport.await(requestKey.delete());
+        } catch (RuntimeException ignored) { }
+    }
+    private static String resolvedPaymentMethod(DocumentSnapshot order) {
+        String method = order.getString("paymentMethod");
+        if (method == null || method.isBlank()) return null;
+        if ("PAYMONGO".equalsIgnoreCase(method)) return "PAYMONGO";
+        if ("PAYPAL".equalsIgnoreCase(method)) return "PAYPAL";
+        if ("ONLINE".equalsIgnoreCase(method) && ("PAYMONGO".equalsIgnoreCase(order.getString("paidByUid"))
+                || (order.getString("paypalOrderId") == null && order.getString("paymentLinkId") != null))) {
+            return "PAYMONGO";
+        }
+        return method;
+    }
+    private static String resolvedPaymentEventMethod(DocumentSnapshot row) {
+        String method = row.getString("method");
+        if (method == null || method.isBlank()) return null;
+        if ("ONLINE".equalsIgnoreCase(method) && row.getString("paypalOrderId") == null && row.getString("paymentLinkId") != null) {
+            return "PAYMONGO";
+        }
+        return method;
+    }
+    private PayPalGateway gateway() {
+        if (payPal == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                "PayPal Sandbox is not configured in this service instance.");
+        return payPal;
     }
     private static boolean isPaid(DocumentSnapshot order) { return "PAID".equals(order.getString("paymentStatus")); }
     private static boolean isPaymentLocked(DocumentSnapshot order) { return "PAID".equals(paymentStatus(order)) || "PENDING".equals(paymentStatus(order)); }
@@ -1137,6 +1179,7 @@ public class ShopOrderService {
     }
     private static String validatePaymentMethodPreference(String value) {
         String normalized = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if ("PAYPAL".equals(normalized)) return "ONLINE";
         if (!List.of("CASH", "ONLINE").contains(normalized))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment method must be CASH or ONLINE.");
         return normalized;

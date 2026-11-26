@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, LoaderCircle, Receipt, RefreshCw } from 'lucide-react';
 import api, { apiErrorMessage } from './api.js';
-import { formatDateTime, formatPaymentMethod, formatPaymentStatus, formatPeso } from './formatters.js';
+import { formatDateTime, formatOrderPaymentMethod, formatPaymentMethod, formatPaymentStatus, formatPeso } from './formatters.js';
 import { normalizeOrderDetailResponse } from './orderPageData.js';
 import OrderStatusTracker, { stageDisplayLabel } from './components/OrderStatusTracker.jsx';
 import OrderQuantityBadge from './components/OrderQuantityBadge.jsx';
@@ -81,7 +81,7 @@ export default function CustomerOrderDetailPage() {
               </p>
               {order.paymentMethod && (
                 <p className="mt-1 text-sm text-slate-500">
-                  Payment method: {formatPaymentMethod(order.paymentMethod)}
+                  Payment method: {formatOrderPaymentMethod(order)}
                   {order.paidAt ? ` \u00b7 ${formatDateTime(order.paidAt)}` : ''}
                 </p>
               )}

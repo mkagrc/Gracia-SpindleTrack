@@ -3,6 +3,7 @@ package com.spindletrack.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
@@ -13,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 import com.google.api.core.ApiFutures;
@@ -20,6 +22,8 @@ import com.google.cloud.firestore.CollectionReference;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.Query;
+import com.google.cloud.firestore.QuerySnapshot;
 import com.google.cloud.firestore.Transaction;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -217,116 +221,229 @@ class ShopOrderPricingServiceTest {
     }
 
     @Test
-    void onlineLinkStoresPendingAmountAndOrderReferenceAndConfirmsOnlyMatchingPayment() throws Exception {
+    void paypalOrderStoresPendingPaymentAndCapturesOnlyMatchingOrder() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
         when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
         when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
-        when(gateway.createPaymentLink(12345L, "order-A", "O-000001")).thenReturn(new PayMongoGateway.CreatedLink("link-abc", "https://pm.link/test", 12345L, "PHP", "ref-1"));
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.createOrder(new BigDecimal("123.45"), "order-A", "O-000001"))
+                .thenReturn(new PayPalGateway.CreatedOrder("PP-123", "https://www.sandbox.paypal.com/checkoutnow?token=PP-123",
+                        new BigDecimal("123.45"), "PHP"));
         ShopOrderService service = new ShopOrderService(f.firebase, gateway);
-        ShopOrderService.PaymentLinkResult created = service.createPaymentLink(f.staff(), "order-A");
+        ShopOrderService.PayPalOrderResult created = service.createPayPalOrder(f.staff(), "order-A");
         assertEquals("PENDING", created.order().paymentStatus());
-        assertEquals("https://pm.link/test", created.paymentLinkUrl());
-        verify(f.tx).update(eq(f.order), argThat(values -> "PENDING".equals(values.get("paymentStatus")) && "ONLINE".equals(values.get("paymentMethod")) && Long.valueOf(12345L).equals(values.get("paymentAmountCentavos")) && "order-A".equals(values.get("paymentOrderIdReference"))));
-        verify(f.tx).create(eq(f.paymentRecord), argThat(values -> "shop-A".equals(values.get("shopId")) && "order-A".equals(values.get("orderId")) && "PENDING".equals(values.get("status"))));
+        assertEquals("PAYPAL", created.order().paymentMethod());
+        assertEquals("PP-123", created.paypalOrderId());
+        assertEquals("https://www.sandbox.paypal.com/checkoutnow?token=PP-123", created.approvalUrl());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PENDING".equals(values.get("paymentStatus"))
+                && "PAYPAL".equals(values.get("paymentMethod"))
+                && "PP-123".equals(values.get("paypalOrderId"))
+                && Long.valueOf(12345L).equals(values.get("paymentAmountCentavos"))
+                && "order-A".equals(values.get("paymentOrderIdReference"))));
+        verify(f.tx).create(eq(f.paymentRecord), argThat(values -> "shop-A".equals(values.get("shopId"))
+                && "order-A".equals(values.get("orderId"))
+                && "PAYPAL".equals(values.get("method"))
+                && "PP-123".equals(values.get("paypalOrderId"))
+                && "PENDING".equals(values.get("status"))));
 
         when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
-        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-123");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("PP-123");
         when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
         when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
         when(f.orderSnapshot.getString("paymentRecordId")).thenReturn("payment-doc-A");
-        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
-        ShopOrderService.OrderSummary paid = service.confirmOnlinePayment(f.staff(), "order-A");
-        assertEquals("PAID", paid.paymentStatus()); assertEquals("ONLINE", paid.paymentMethod());
-        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus")) && "ONLINE".equals(values.get("paymentMethod"))));
+        when(gateway.captureOrder("PP-123"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-123", "COMPLETED", new BigDecimal("123.45"), "PHP", "CAP-1"));
+
+        ShopOrderService.OrderSummary paid = service.capturePayPalOrder(f.staff(), "order-A",
+                new ShopOrderService.PayPalCaptureRequest("PP-123"));
+        assertEquals("PAID", paid.paymentStatus());
+        assertEquals("PAYPAL", paid.paymentMethod());
+        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
+                && "PAYPAL".equals(values.get("paymentMethod"))
+                && "PAYPAL".equals(values.get("paidByUid"))));
+        verify(f.tx).update(eq(f.paymentRecord), argThat(values -> "PAID".equals(values.get("status"))
+                && "CAP-1".equals(values.get("externalPaymentId"))));
     }
 
     @Test
-    void cashPreferenceRejectsPaymentLinkCreation() throws Exception {
+    void cashPreferenceRejectsPayPalOrderCreation() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
         when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("CASH");
         when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
+        PayPalGateway gateway = mock(PayPalGateway.class);
 
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase, gateway).createPaymentLink(f.staff(), "order-A"));
+                () -> new ShopOrderService(f.firebase, gateway).createPayPalOrder(f.staff(), "order-A"));
 
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
-        verify(gateway, never()).createPaymentLink(any(Long.class), eq("order-A"), any(String.class));
+        verify(gateway, never()).createOrder(any(), eq("order-A"), any());
         verify(f.tx, never()).update(eq(f.order), any(Map.class));
     }
 
     @Test
-    void onlineConfirmationRejectsWrongAmountOrOrderReference() throws Exception {
+    void paypalCaptureRejectsAmountCurrencyStatusAndOrderMismatch() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
         when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
-        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
-        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
-        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L); f.transactionHarness();
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
-        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12344L, "other-order"));
-        ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> new ShopOrderService(f.firebase, gateway).confirmOnlinePayment(f.staff(), "order-A"));
-        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-123");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        f.transactionHarness();
+        PayPalGateway gateway = mock(PayPalGateway.class);
+
+        // Wrong PayPal order ID passed
+        ResponseStatusException wrongId = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        f.staff(), "order-A", new ShopOrderService.PayPalCaptureRequest("PP-OTHER")));
+        assertEquals(HttpStatus.CONFLICT, wrongId.getStatusCode());
+
+        // Amount mismatch
+        when(gateway.captureOrder("PP-123"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-123", "COMPLETED", new BigDecimal("120.00"), "PHP", "CAP-1"));
+        ResponseStatusException wrongAmount = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        f.staff(), "order-A", new ShopOrderService.PayPalCaptureRequest("PP-123")));
+        assertEquals(HttpStatus.CONFLICT, wrongAmount.getStatusCode());
+
+        // Currency mismatch
+        when(gateway.captureOrder("PP-123"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-123", "COMPLETED", new BigDecimal("123.45"), "USD", "CAP-1"));
+        ResponseStatusException wrongCurrency = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        f.staff(), "order-A", new ShopOrderService.PayPalCaptureRequest("PP-123")));
+        assertEquals(HttpStatus.CONFLICT, wrongCurrency.getStatusCode());
+
+        // Non-COMPLETED status
+        when(gateway.captureOrder("PP-123"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-123", "PENDING", new BigDecimal("123.45"), "PHP", "CAP-1"));
+        ResponseStatusException notCompleted = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        f.staff(), "order-A", new ShopOrderService.PayPalCaptureRequest("PP-123")));
+        assertEquals(HttpStatus.CONFLICT, notCompleted.getStatusCode());
         verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
     }
 
     @Test
-    void duplicateOnlineConfirmationIsIdempotent() throws Exception {
+    void paypalCaptureRejectsWrongShopAndWrongRole() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-123");
+        f.transactionHarness();
+        PayPalGateway gateway = mock(PayPalGateway.class);
+
+        FirebasePrincipal otherShopStaff = new FirebasePrincipal("s2", "s2@example.com", "Other", "u2", "STAFF", "shop-B", "ACTIVE");
+        ResponseStatusException wrongShop = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        otherShopStaff, "order-A", new ShopOrderService.PayPalCaptureRequest("PP-123")));
+        assertEquals(HttpStatus.NOT_FOUND, wrongShop.getStatusCode());
+
+        ResponseStatusException wrongRole = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).capturePayPalOrder(
+                        f.owner(), "order-A", new ShopOrderService.PayPalCaptureRequest("PP-123")));
+        assertEquals(HttpStatus.FORBIDDEN, wrongRole.getStatusCode());
+        verify(gateway, never()).captureOrder(any());
+    }
+
+    @Test
+    void duplicatePayPalCaptureIsIdempotent() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
-        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING", "PENDING", "PENDING", "PENDING", "PAID");
-        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("ONLINE");
-        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-123");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("PP-123");
         when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
         when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
-        when(gateway.findPaidPayment("link-abc")).thenReturn(new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.captureOrder("PP-123"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-123", "COMPLETED", new BigDecimal("123.45"), "PHP", "CAP-1"));
         ShopOrderService service = new ShopOrderService(f.firebase, gateway);
 
-        assertEquals("PAID", service.confirmOnlinePayment(f.staff(), "order-A").paymentStatus());
-        assertEquals("PAID", service.confirmOnlinePayment(f.staff(), "order-A").paymentStatus());
-        verify(gateway, times(1)).findPaidPayment("link-abc");
+        assertEquals("PAID", service.capturePayPalOrder(f.staff(), "order-A", null).paymentStatus());
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PAID");
+        assertEquals("PAID", service.capturePayPalOrder(f.staff(), "order-A", null).paymentStatus());
+        verify(gateway, times(1)).captureOrder("PP-123");
         verify(f.tx, times(1)).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))));
     }
 
     @Test
-    void cashSettlementLosesSafelyWhenProviderPaymentCompletesDuringLinkArchive() throws Exception {
+    void failedPayPalOrderCreationReleasesLockSoRetrySucceeds() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
-        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING");
-        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
-        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
-        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
-        when(gateway.findPaidPayment("link-abc")).thenReturn(null,
-                new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.createOrder(new BigDecimal("123.45"), "order-A", "O-000001"))
+                .thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "PayPal failed."))
+                .thenReturn(new PayPalGateway.CreatedOrder("PP-999", "https://www.sandbox.paypal.com/checkoutnow?token=PP-999",
+                        new BigDecimal("123.45"), "PHP"));
 
-        ResponseStatusException error = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase, gateway).recordCashPayment(f.staff(), "order-A"));
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+        String reqId = "00000000-0000-4000-8000-000000000099";
 
-        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
-        verify(gateway).archivePaymentLink("link-abc");
-        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
-                && "ONLINE".equals(values.get("paymentMethod"))));
-        verify(f.tx, never()).create(eq(f.paymentRecord), argThat(values -> "CASH".equals(values.get("method"))));
+        ResponseStatusException first = assertThrows(ResponseStatusException.class,
+                () -> service.createPayPalOrder(f.staff(), "order-A", new ShopOrderService.PayPalOrderRequest(reqId)));
+        assertEquals(HttpStatus.BAD_GATEWAY, first.getStatusCode());
+        verify(f.paymentRequestDoc, times(1)).delete();
+
+        ShopOrderService.PayPalOrderResult second = service.createPayPalOrder(
+                f.staff(), "order-A", new ShopOrderService.PayPalOrderRequest(reqId));
+        assertEquals("PP-999", second.paypalOrderId());
     }
 
     @Test
-    void cancelLosesSafelyWhenProviderPaymentCompletesDuringArchive() throws Exception {
+    void activeCreatingLockRejectsWith409WhileExpiredCreatingLockAllowsRetry() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
-        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING", "PENDING", "PENDING");
-        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link-abc");
-        when(f.orderSnapshot.getString("paymentOrderIdReference")).thenReturn("order-A");
-        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
-        PayMongoGateway gateway = mock(PayMongoGateway.class);
-        when(gateway.findPaidPayment("link-abc")).thenReturn(null,
-                new PayMongoGateway.VerifiedPayment("pay-1", "paid", 12345L, "order-A"));
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
+        String reqId = "00000000-0000-4000-8000-000000000077";
 
-        ResponseStatusException error = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase, gateway).cancelPaymentLink(f.staff(), "order-A"));
+        when(f.paymentRequestSnapshot.exists()).thenReturn(true);
+        when(f.paymentRequestSnapshot.getString("status")).thenReturn("CREATING");
+        // Unexpired lock (+30s) -> 409 Conflict
+        when(f.paymentRequestSnapshot.get("expiresAt"))
+                .thenReturn(java.util.Date.from(java.time.Instant.now().plusSeconds(30)))
+                .thenReturn(java.util.Date.from(java.time.Instant.now().minusSeconds(10)));
 
-        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
-        verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus"))
-                && "ONLINE".equals(values.get("paymentMethod"))));
-        verify(f.tx, never()).update(eq(f.order), argThat(values -> "UNPAID".equals(values.get("paymentStatus"))));
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.createOrder(new BigDecimal("123.45"), "order-A", "O-000001"))
+                .thenReturn(new PayPalGateway.CreatedOrder("PP-EXPIRED-OK", "https://www.sandbox.paypal.com/checkoutnow?token=PP-EXPIRED-OK",
+                        new BigDecimal("123.45"), "PHP"));
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+
+        ResponseStatusException blocked = assertThrows(ResponseStatusException.class,
+                () -> service.createPayPalOrder(f.staff(), "order-A", new ShopOrderService.PayPalOrderRequest(reqId)));
+        assertEquals(HttpStatus.CONFLICT, blocked.getStatusCode());
+        verify(gateway, never()).createOrder(any(), any(), any());
+
+        // Expired lock (-10s) -> proceeds cleanly
+        ShopOrderService.PayPalOrderResult retried = service.createPayPalOrder(
+                f.staff(), "order-A", new ShopOrderService.PayPalOrderRequest(reqId));
+        assertEquals("PP-EXPIRED-OK", retried.paypalOrderId());
+    }
+
+    @Test
+    void legacyPayMongoOrderMapsAsPayMongoForBackwardCompatibility() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PAID");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paidByUid")).thenReturn("PAYMONGO");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("link_legacy_123");
+        when(f.shopSnapshot.getString("name")).thenReturn("Sample Shop");
+        when(f.db.collection("orderStageHistory")).thenReturn(f.stageHistoryCollection);
+        Query historyQuery = mock(Query.class);
+        Query historyQuery2 = mock(Query.class);
+        QuerySnapshot emptyQs = mock(QuerySnapshot.class);
+        when(f.stageHistoryCollection.whereEqualTo("shopId", "shop-A")).thenReturn(historyQuery);
+        when(historyQuery.whereEqualTo("orderId", "order-A")).thenReturn(historyQuery2);
+        when(historyQuery2.get()).thenReturn(ApiFutures.immediateFuture(emptyQs));
+        when(emptyQs.getDocuments()).thenReturn(List.of());
+        QuerySnapshot emptyPriceQs = mock(QuerySnapshot.class);
+        when(f.priceLogCollection.get()).thenReturn(ApiFutures.immediateFuture(emptyPriceQs));
+        when(emptyPriceQs.getDocuments()).thenReturn(List.of());
+
+        ShopOrderService.OrderDetail detail = new ShopOrderService(f.firebase).get(f.staff(), "order-A");
+        assertEquals("PAYMONGO", detail.order().paymentMethod());
+        assertEquals("PAYMONGO", detail.invoice().paymentMethod());
     }
 
     private static final class Fixture {
@@ -346,6 +463,9 @@ class ShopOrderPricingServiceTest {
         final DocumentReference stageHistory = mock(DocumentReference.class);
         final DocumentReference priceLog = mock(DocumentReference.class);
         final DocumentReference paymentRecord = mock(DocumentReference.class);
+        final CollectionReference paymentRequestCollection = mock(CollectionReference.class);
+        final DocumentReference paymentRequestDoc = mock(DocumentReference.class);
+        final DocumentSnapshot paymentRequestSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot shopSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot serviceSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot counterSnapshot = mock(DocumentSnapshot.class);
@@ -374,6 +494,9 @@ class ShopOrderPricingServiceTest {
             when(stageHistoryCollection.document()).thenReturn(stageHistory);
             when(order.collection("priceLog")).thenReturn(priceLogCollection);
             when(priceLogCollection.document()).thenReturn(priceLog);
+            when(order.collection("paymentLinkRequests")).thenReturn(paymentRequestCollection);
+            when(paymentRequestCollection.document(anyString())).thenReturn(paymentRequestDoc);
+            when(paymentRequestDoc.delete()).thenReturn(ApiFutures.immediateFuture(null));
             when(shop.get()).thenReturn(ApiFutures.immediateFuture(shopSnapshot));
             when(shopSnapshot.exists()).thenReturn(true);
             when(shopSnapshot.getString("status")).thenReturn("ACTIVE");
@@ -410,6 +533,7 @@ class ShopOrderPricingServiceTest {
                 if (ref == counter) return ApiFutures.immediateFuture(counterSnapshot);
                 if (ref == service) return ApiFutures.immediateFuture(serviceSnapshot);
                 if (ref == order) return ApiFutures.immediateFuture(orderSnapshot);
+                if (ref == paymentRequestDoc) return ApiFutures.immediateFuture(paymentRequestSnapshot);
                 return ApiFutures.immediateFuture(mock(DocumentSnapshot.class));
             });
             when(db.runTransaction(any(Transaction.Function.class))).thenAnswer(invocation -> {

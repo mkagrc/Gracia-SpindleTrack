@@ -46,7 +46,6 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/public/orders/lookup").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/public/shops").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/public/shops/**").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/api/paymongo/webhook").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/session").authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/shops/register").hasRole("CUSTOMER")
                         .requestMatchers(HttpMethod.GET, "/api/shops/mine/registration").hasRole("OWNER")

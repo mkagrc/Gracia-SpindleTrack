@@ -1,5 +1,5 @@
 import { Printer } from 'lucide-react';
-import { formatDateTime, formatPaymentMethod, formatPaymentStatus, formatPaymentTiming, formatPeso } from './formatters.js';
+import { formatDateTime, formatOrderPaymentMethod, formatPaymentStatus, formatPaymentTiming, formatPeso } from './formatters.js';
 import { billingTypeBadgeLabel, formatActualWeight, formatOrderQuantity, normalizeBillingType } from './orderPricing.js';
 
 function formatLineQuantity(type, rawQuantity, rawUnit) {
@@ -122,7 +122,7 @@ export default function InvoiceSection({ invoice, order, customerView = false })
       </div>
 
       <div className="mt-5 grid gap-3 border-t border-slate-200 pt-4 text-sm sm:grid-cols-2">
-        <p><span className="font-semibold">Payment method:</span> {formatPaymentMethod(method)}</p>
+        <p><span className="font-semibold">Payment method:</span> {formatOrderPaymentMethod(order, method)}</p>
         <p><span className="font-semibold">Payment timing:</span> {formatPaymentTiming(timing)}</p>
         <p><span className="font-semibold">Payment status:</span> {formatPaymentStatus(status)}</p>
         {status === 'PAID' && paidAt && (

@@ -153,25 +153,32 @@ class ShopOrderControllerTest {
     }
 
     @Test
-    void onlinePaymentLinkConfirmationAndCancellationAreStaffOnly() throws Exception {
+    void paypalOrderCaptureAndCancellationAreStaffOnly() throws Exception {
         ShopOrderService.OrderSummary summary = new ShopOrderService.OrderSummary("order-id-a7", "shop-string-A", "O-000001",
                 "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
-                "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "PENDING", "ONLINE", null, null, null);
-        when(orders.createPaymentLink(any(), eq("order-id-a7"), any())).thenReturn(new ShopOrderService.PaymentLinkResult(summary, "link-1", "https://pm.link/test"));
-        when(orders.confirmOnlinePayment(any(), eq("order-id-a7"))).thenReturn(summary);
+                "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "PENDING", "PAYPAL", null, null, null);
+        when(orders.createPayPalOrder(any(), eq("order-id-a7"), any()))
+                .thenReturn(new ShopOrderService.PayPalOrderResult(summary, "PP-ORDER-1", "https://www.sandbox.paypal.com/checkoutnow?token=PP-ORDER-1"));
+        when(orders.capturePayPalOrder(any(), eq("order-id-a7"), any())).thenReturn(summary);
         when(orders.cancelPaymentLink(any(), eq("order-id-a7"))).thenReturn(summary);
-        mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth("STAFF")))
+
+        mvc.perform(post("/api/shops/orders/order-id-a7/payments/paypal-order").with(authentication(auth("STAFF")))
                 .contentType(MediaType.APPLICATION_JSON).content("{\"clientRequestId\":\"00000000-0000-4000-8000-000000000002\"}"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.paymentLinkUrl").value("https://pm.link/test"));
-        mvc.perform(post("/api/shops/orders/order-id-a7/payments/confirm-online").with(authentication(auth("STAFF"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paypalOrderId").value("PP-ORDER-1"))
+                .andExpect(jsonPath("$.approvalUrl").value("https://www.sandbox.paypal.com/checkoutnow?token=PP-ORDER-1"));
+        mvc.perform(post("/api/shops/orders/order-id-a7/payments/paypal-capture").with(authentication(auth("STAFF")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"paypalOrderId\":\"PP-ORDER-1\"}"))
                 .andExpect(status().isOk());
         mvc.perform(post("/api/shops/orders/order-id-a7/payments/cancel-link").with(authentication(auth("STAFF"))))
                 .andExpect(status().isOk());
+
         for (String role : List.of("OWNER", "PLATFORM_ADMIN", "CUSTOMER")) {
-            mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth(role)))
+            mvc.perform(post("/api/shops/orders/order-id-a7/payments/paypal-order").with(authentication(auth(role)))
                     .contentType(MediaType.APPLICATION_JSON).content("{\"clientRequestId\":\"00000000-0000-4000-8000-000000000002\"}"))
                     .andExpect(status().isForbidden());
-            mvc.perform(post("/api/shops/orders/order-id-a7/payments/confirm-online").with(authentication(auth(role))))
+            mvc.perform(post("/api/shops/orders/order-id-a7/payments/paypal-capture").with(authentication(auth(role)))
+                    .contentType(MediaType.APPLICATION_JSON).content("{\"paypalOrderId\":\"PP-ORDER-1\"}"))
                     .andExpect(status().isForbidden());
             mvc.perform(post("/api/shops/orders/order-id-a7/payments/cancel-link").with(authentication(auth(role))))
                     .andExpect(status().isForbidden());

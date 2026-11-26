@@ -63,19 +63,20 @@ public class ShopOrderController {
         return orders.recordCashPayment(principal, orderId);
     }
 
-    @PostMapping("/{orderId}/payments/paymongo-link")
+    @PostMapping("/{orderId}/payments/paypal-order")
     @PreAuthorize("hasRole('STAFF')")
-    public ShopOrderService.PaymentLinkResult createPayMongoLink(@PathVariable String orderId,
-            @Valid @RequestBody ShopOrderService.PaymentLinkRequest request,
+    public ShopOrderService.PayPalOrderResult createPayPalOrder(@PathVariable String orderId,
+            @RequestBody(required = false) ShopOrderService.PayPalOrderRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        return orders.createPaymentLink(principal, orderId, request);
+        return orders.createPayPalOrder(principal, orderId, request);
     }
 
-    @PostMapping("/{orderId}/payments/confirm-online")
+    @PostMapping("/{orderId}/payments/paypal-capture")
     @PreAuthorize("hasRole('STAFF')")
-    public ShopOrderService.OrderSummary confirmOnlinePayment(@PathVariable String orderId,
+    public ShopOrderService.OrderSummary capturePayPalOrder(@PathVariable String orderId,
+            @RequestBody(required = false) ShopOrderService.PayPalCaptureRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        return orders.confirmOnlinePayment(principal, orderId);
+        return orders.capturePayPalOrder(principal, orderId, request);
     }
 
     @PostMapping("/{orderId}/payments/cancel-link")
