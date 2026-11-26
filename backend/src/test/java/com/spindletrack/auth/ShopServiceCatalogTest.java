@@ -86,16 +86,28 @@ class ShopServiceCatalogTest {
     }
 
     @Test
-    void servicePricesMustBePositiveAtMostTwoDecimalsAndNoMoreThanOneHundredThousand() {
+    void serviceAllowsZeroPriceButRejectsInvalidPriceCategoryAndLoadMetadata() {
         FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
         ShopServiceCatalog catalog = new ShopServiceCatalog(firebase);
-        for (java.math.BigDecimal invalid : List.of(java.math.BigDecimal.ZERO,
-                new java.math.BigDecimal("-1.00"), new java.math.BigDecimal("1.001"),
+        for (java.math.BigDecimal invalid : List.of(new java.math.BigDecimal("-1.00"), new java.math.BigDecimal("1.001"),
                 new java.math.BigDecimal("100000.01"))) {
-            ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> catalog.create(
-                    "shop-string-A", new ShopServiceCatalog.ServiceRequest("Wash", invalid, "kg")));
+            ResponseStatusException error = assertThrows(ResponseStatusException.class, () ->
+                    ShopServiceCatalog.validate(new ShopServiceCatalog.ServiceRequest("Wash", invalid, "kg")));
             assertEquals(HttpStatus.BAD_REQUEST, error.getStatusCode());
         }
+        ShopServiceCatalog.validate(new ShopServiceCatalog.ServiceRequest("Promotion", java.math.BigDecimal.ZERO, "kg"));
+        assertThrows(ResponseStatusException.class, () -> ShopServiceCatalog.validate(
+                new ShopServiceCatalog.ServiceRequest("Wash", java.math.BigDecimal.ONE, "kg", null,
+                        "PER_KG", null, null, "", true)));
+        for (java.math.BigDecimal invalidMetadata : List.of(java.math.BigDecimal.ZERO,
+                new java.math.BigDecimal("1.001"), new java.math.BigDecimal("1000.00"))) {
+            assertThrows(ResponseStatusException.class, () -> ShopServiceCatalog.validate(
+                    new ShopServiceCatalog.ServiceRequest("Load", java.math.BigDecimal.ONE, "load", "Wash",
+                            "PER_LOAD", invalidMetadata, null, "", true)));
+        }
+        assertThrows(ResponseStatusException.class, () -> ShopServiceCatalog.validate(
+                new ShopServiceCatalog.ServiceRequest("Load", java.math.BigDecimal.ONE, "load", "Wash",
+                        "PER_KG", null, new java.math.BigDecimal("1.001"), "", true)));
         assertThrows(ResponseStatusException.class, () -> catalog.update("shop-string-A", "service-id",
                 new ShopServiceCatalog.ServiceRequest("Wash", new java.math.BigDecimal("100000.001"), "kg")));
     }

@@ -18,6 +18,9 @@ public class AuthService {
     }
 
     public AuthSessionResponse createOrLoadSession(FirebaseIdentity identity) {
+        if (identity == null || !identity.emailVerified()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Please verify your email before signing in.");
+        }
         boolean isConfiguredAdmin = isAdminEmail(identity.email());
         UserAccount account = users.findByFirebaseUid(identity.uid()).orElse(null);
 

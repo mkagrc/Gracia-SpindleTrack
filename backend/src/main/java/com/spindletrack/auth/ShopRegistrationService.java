@@ -65,6 +65,8 @@ public class ShopRegistrationService {
             String name = request.shopName().trim();
             String address = request.address().trim();
             String contactNumber = request.contactNumber().trim();
+            String municipality = OwnerShopService.normalizeOptionalText(request.municipality());
+            String province = OwnerShopService.normalizeOptionalText(request.province());
             FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(userRef));
                 if (!current.exists() || !firebaseUid.equals(current.getString("firebaseUid"))
@@ -74,7 +76,7 @@ public class ShopRegistrationService {
                 if (!"CUSTOMER".equals(current.getString("role")) || current.getString("shopId") != null) {
                     throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Please use another account.");
                 }
-                tx.create(shopRef, shopData(shopRef.getId(), name, address, contactNumber, "PENDING", null, stored.size()));
+                tx.create(shopRef, shopData(shopRef.getId(), name, address, contactNumber, municipality, province, "PENDING", null, stored.size()));
                 tx.update(userRef, Map.of("role", "OWNER", "shopId", shopRef.getId(), "updatedAt",
                         com.google.cloud.firestore.FieldValue.serverTimestamp()));
                 tx.create(historyRef, historyData(shopRef.getId(), "SUBMITTED", null, account.id()));
@@ -108,6 +110,8 @@ public class ShopRegistrationService {
             String name = request.shopName().trim();
             String address = request.address().trim();
             String contactNumber = request.contactNumber().trim();
+            String municipality = OwnerShopService.normalizeOptionalText(request.municipality());
+            String province = OwnerShopService.normalizeOptionalText(request.province());
             FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot user = FirestoreSupport.await(tx.get(userRef));
                 DocumentSnapshot shop = FirestoreSupport.await(tx.get(shopRef));
@@ -131,6 +135,8 @@ public class ShopRegistrationService {
                 update.put("name", name);
                 update.put("address", address);
                 update.put("contactNumber", contactNumber);
+                update.put("municipality", municipality);
+                update.put("province", province);
                 update.put("status", "PENDING");
                 update.put("rejectionReason", null);
                 update.put("reviewedBy", null);
@@ -156,7 +162,8 @@ public class ShopRegistrationService {
         DocumentSnapshot shop = FirestoreSupport.await(firebase.firestore().collection("shops").document(account.shopId()).get());
         if (!shop.exists()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No shop registration was found.");
         return new ShopRegistrationStatusResponse(shop.getId(), shop.getString("name"), shop.getString("address"),
-                shop.getString("contactNumber"), shop.getString("status"), shop.getString("rejectionReason"),
+                shop.getString("contactNumber"), shop.getString("municipality"), shop.getString("province"),
+                shop.getString("status"), shop.getString("rejectionReason"),
                 FirestoreSupport.dateTime(shop.get("createdAt")), documents.findMetadataForShop(shop.getId()));
     }
 
@@ -228,12 +235,14 @@ public class ShopRegistrationService {
     }
 
     private static Map<String, Object> shopData(String shopId, String name, String address, String contactNumber,
-            String status, String reason, int documentCount) {
+            String municipality, String province, String status, String reason, int documentCount) {
         Map<String, Object> data = new HashMap<>();
         data.put("shopId", shopId);
         data.put("name", name);
         data.put("address", address);
         data.put("contactNumber", contactNumber);
+        data.put("municipality", municipality);
+        data.put("province", province);
         data.put("status", status);
         data.put("rejectionReason", reason);
         data.put("reviewedBy", null);

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Optional;
@@ -59,5 +60,26 @@ class FirebaseBearerAuthenticationFilterTest {
         });
 
         assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void unverifiedEmailOnSessionRequestIsRejectedWithUnauthorizedJson() throws Exception {
+        FirebaseTokenVerifier tokenVerifier = mock(FirebaseTokenVerifier.class);
+        UserAccountRepository accounts = mock(UserAccountRepository.class);
+        when(tokenVerifier.verify("unverified-token"))
+                .thenReturn(new FirebaseIdentity("cust-uid", "cust@gmail.com", "Customer", false));
+        FirebaseBearerAuthenticationFilter filter = new FirebaseBearerAuthenticationFilter(tokenVerifier, accounts,
+                new ObjectMapper(), "admin@example.com");
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/auth/session");
+        request.addHeader("Authorization", "Bearer unverified-token");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        boolean[] reachedController = { false };
+
+        filter.doFilterInternal(request, response, (servletRequest, servletResponse) -> reachedController[0] = true);
+
+        assertEquals(401, response.getStatus());
+        assertTrue(response.getContentAsString().contains("Please verify your email before signing in."));
+        assertFalse(reachedController[0]);
+        verifyNoInteractions(accounts);
     }
 }

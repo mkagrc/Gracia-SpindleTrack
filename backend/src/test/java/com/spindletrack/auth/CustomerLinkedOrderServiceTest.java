@@ -122,6 +122,66 @@ class CustomerLinkedOrderServiceTest {
         verify(f.db, never()).collection("orderStageHistory");
     }
 
+    @Test
+    void signedInOrderOwnerReceivesInvoiceDetailWithCatalogSnapshot() throws Exception {
+        Fixture f = new Fixture();
+        DocumentReference ownOrderRef = mock(DocumentReference.class);
+        DocumentSnapshot ownOrder = mock(DocumentSnapshot.class);
+        when(f.orders.document("order-own")).thenReturn(ownOrderRef);
+        when(ownOrderRef.get()).thenReturn(ApiFutures.immediateFuture(ownOrder));
+        when(ownOrder.exists()).thenReturn(true);
+        when(ownOrder.getId()).thenReturn("order-own");
+        when(ownOrder.getString("customerUserId")).thenReturn("customer-user-1");
+        when(ownOrder.getString("shopId")).thenReturn("shop-A");
+        when(ownOrder.getString("orderCode")).thenReturn("O-000123");
+        when(ownOrder.getString("customerName")).thenReturn("Verified Customer");
+        when(ownOrder.getString("serviceName")).thenReturn("Wash");
+        when(ownOrder.getString("stage")).thenReturn("READY");
+        when(ownOrder.getString("paymentStatus")).thenReturn("UNPAID");
+        when(ownOrder.getString("paymentMethodPreference")).thenReturn("CASH");
+        when(ownOrder.getString("paymentTiming")).thenReturn("PAY_NOW");
+        when(ownOrder.getString("quantityUnit")).thenReturn("kg");
+        when(ownOrder.getString("unit")).thenReturn("kg");
+        when(ownOrder.get("quantity")).thenReturn(new BigDecimal("2.00"));
+        when(ownOrder.get("totalPriceCentavos")).thenReturn(5000L);
+        when(ownOrder.get("serviceSubtotal")).thenReturn(new BigDecimal("50.00"));
+        when(ownOrder.get("addOnsSubtotal")).thenReturn(new BigDecimal("0.00"));
+        when(ownOrder.get("addOns")).thenReturn(List.of());
+        when(ownOrder.get("service")).thenReturn(java.util.Map.of("id", "service-A", "name", "Wash", "category", "Wash",
+                "billingType", "PER_KG", "unitPrice", new BigDecimal("25.00")));
+        when(f.shop.getString("name")).thenReturn("Laundry One");
+
+        Query historyShopQuery = mock(Query.class);
+        Query historyOrderQuery = mock(Query.class);
+        QuerySnapshot histories = mock(QuerySnapshot.class);
+        when(f.histories.whereEqualTo("shopId", "shop-A")).thenReturn(historyShopQuery);
+        when(historyShopQuery.whereEqualTo("orderId", "order-own")).thenReturn(historyOrderQuery);
+        when(historyOrderQuery.get()).thenReturn(ApiFutures.immediateFuture(histories));
+        when(histories.getDocuments()).thenReturn(List.of());
+
+        CollectionReference payments = mock(CollectionReference.class);
+        Query paymentShopQuery = mock(Query.class);
+        Query paymentOrderQuery = mock(Query.class);
+        QuerySnapshot paymentRows = mock(QuerySnapshot.class);
+        when(f.db.collection("payments")).thenReturn(payments);
+        when(payments.whereEqualTo("shopId", "shop-A")).thenReturn(paymentShopQuery);
+        when(paymentShopQuery.whereEqualTo("orderId", "order-own")).thenReturn(paymentOrderQuery);
+        when(paymentOrderQuery.get()).thenReturn(ApiFutures.immediateFuture(paymentRows));
+        when(paymentRows.getDocuments()).thenReturn(List.of());
+
+        ShopOrderService.CustomerOrderDetail unpaidResult = new ShopOrderService(f.firebase).getMyOrder(f.customerPrincipal(), "order-own");
+        org.junit.jupiter.api.Assertions.assertNull(unpaidResult.invoice());
+
+        when(ownOrder.getString("paymentStatus")).thenReturn("PAID");
+        when(ownOrder.getString("paymentMethod")).thenReturn("CASH");
+        ShopOrderService.CustomerOrderDetail result = new ShopOrderService(f.firebase).getMyOrder(f.customerPrincipal(), "order-own");
+
+        assertEquals("Laundry One", result.invoice().shopName());
+        assertEquals("O-000123", result.invoice().orderCode());
+        assertEquals(new BigDecimal("50.00"), result.invoice().total());
+        assertEquals(new BigDecimal("2.00"), result.invoice().quantity());
+    }
+
     private static final class Fixture {
         final FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
         final Firestore db = mock(Firestore.class);
@@ -174,6 +234,7 @@ class CustomerLinkedOrderServiceTest {
             when(service.getString("name")).thenReturn("Wash");
             when(service.getString("unit")).thenReturn("kg");
             when(service.getBoolean("active")).thenReturn(true);
+            when(service.get("pricePerUnit")).thenReturn(new BigDecimal("25.00"));
             when(customerSnapshot.exists()).thenReturn(true);
             when(customerSnapshot.getBoolean("active")).thenReturn(true);
             when(customerSnapshot.getBoolean("emailVerified")).thenReturn(true);

@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.cloud.Timestamp;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
@@ -36,9 +37,36 @@ public class OwnerOperationsService {
     public OwnerOperationsService(FirebaseAdminTokenVerifier firebase) { this.firebase = firebase; }
 
     public record UnclaimedOrder(String id, String orderCode, String customerName, BigDecimal kilos,
-            BigDecimal totalPrice, Instant readyAt, Instant unclaimedAt, String unit) {
-        public BigDecimal quantity() { return kilos; }
+            BigDecimal totalPrice, Instant readyAt, Instant unclaimedAt, String unit, String billingType,
+            BigDecimal actualWeightKg) {
+        @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public UnclaimedOrder(String id, String orderCode, String customerName, BigDecimal kilos,
+                BigDecimal totalPrice, Instant readyAt, Instant unclaimedAt, String unit) {
+            this(id, orderCode, customerName, kilos, totalPrice, readyAt, unclaimedAt, unit, OrderPricing.billingType(null, unit), null);
+        }
     }
+    public record ReadyOrder(String id, String orderCode, String customerName, BigDecimal kilos,
+            BigDecimal totalPrice, String paymentStatus, Instant readyAt, boolean overdue, String unit,
+            String billingType, BigDecimal actualWeightKg) {
+        @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public ReadyOrder(String id, String orderCode, String customerName, BigDecimal kilos,
+                BigDecimal totalPrice, String paymentStatus, Instant readyAt, boolean overdue, String unit) {
+            this(id, orderCode, customerName, kilos, totalPrice, paymentStatus, readyAt, overdue, unit, OrderPricing.billingType(null, unit), null);
+        }
+    }
+    public record ClaimedOrder(String id, String orderCode, String customerName, BigDecimal kilos,
+            BigDecimal totalPrice, String paymentStatus, Instant claimedAt, String unit,
+            String billingType, BigDecimal actualWeightKg) {
+        @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public ClaimedOrder(String id, String orderCode, String customerName, BigDecimal kilos,
+                BigDecimal totalPrice, String paymentStatus, Instant claimedAt, String unit) {
+            this(id, orderCode, customerName, kilos, totalPrice, paymentStatus, claimedAt, unit, OrderPricing.billingType(null, unit), null);
+        }
+    }
+    public record ReadyAndClaimedResult(List<ReadyOrder> unclaimed, List<ClaimedOrder> claimed) {}
     public record DailyMetric(String date, int orderCount, BigDecimal income) {}
     public record MonthlyMetric(String month, int orderCount, BigDecimal income) {}
     public record OwnerReport(DailyMetric today, MonthlyMetric thisMonth, List<DailyMetric> busiestDays) {}
@@ -52,19 +80,90 @@ public class OwnerOperationsService {
         for (DocumentSnapshot order : snapshot.getDocuments()) {
             if (!shopId.equals(order.getString("shopId")) || !Boolean.TRUE.equals(order.getBoolean("unclaimed"))
                     || !"READY".equals(order.getString("stage"))) continue;
-            Object quantity = order.get("quantity");
-            if (quantity == null) quantity = order.get("kilos");
             result.add(new UnclaimedOrder(order.getId(), order.getString("orderCode"), order.getString("customerName"),
-                    decimal(quantity), Money.fromFirestore(order.get("totalPriceCentavos"), order.get("totalPrice")),
-                    instant(order.get("readyAt")), instant(order.get("unclaimedAt")), order.getString("unit") == null ? "kg" : order.getString("unit")));
+                    orderQuantity(order), Money.fromFirestore(order.get("totalPriceCentavos"), order.get("totalPrice")),
+                    instant(order.get("readyAt")), instant(order.get("unclaimedAt")), orderUnit(order),
+                    orderBillingType(order), OrderPricing.decimal(order.get("actualWeightKg"))));
         }
         result.sort(Comparator.comparing(UnclaimedOrder::unclaimedAt, Comparator.nullsLast(Comparator.reverseOrder()))
                 .thenComparing(UnclaimedOrder::id));
         return result;
     }
 
-    public OwnerReport report(FirebasePrincipal principal) {
-        String shopId = ownerShop(principal);
+    /**
+     * Returns all READY orders (regardless of paymentStatus) as unclaimed,
+     * and all CLAIMED orders, both scoped strictly to the caller's shop.
+     * readyAt is taken from the stage history (READY entry), not from createdAt.
+     * overdue = readyAt is 3 or more days ago (or unclaimedAt is 3+ days if readyAt absent).
+     */
+    public ReadyAndClaimedResult readyOrders(FirebasePrincipal principal) {
+        String shopId = unclaimedShop(principal);
+        Firestore db = firebase.firestore();
+        requireActive(db, shopId);
+        QuerySnapshot snapshot = FirestoreSupport.await(db.collection(ORDERS).whereEqualTo("shopId", shopId).get());
+        QuerySnapshot historySnapshot = FirestoreSupport.await(db.collection("orderStageHistory").whereEqualTo("shopId", shopId).get());
+
+        // Build a map of orderId -> READY changedAt and orderId -> CLAIMED changedAt from history
+        Map<String, Instant> readyAtByOrder = new HashMap<>();
+        Map<String, Instant> claimedAtByOrder = new HashMap<>();
+        for (DocumentSnapshot row : historySnapshot.getDocuments()) {
+            String stage = row.getString("stage");
+            String orderId = row.getString("orderId");
+            if (orderId == null) continue;
+            Instant ts = instant(row.get("changedAt"));
+            if ("READY".equals(stage)) {
+                // Keep the latest READY entry if there are multiple
+                readyAtByOrder.merge(orderId, ts == null ? Instant.EPOCH : ts, (a, b) -> a.isAfter(b) ? a : b);
+            } else if ("CLAIMED".equals(stage)) {
+                claimedAtByOrder.merge(orderId, ts == null ? Instant.EPOCH : ts, (a, b) -> a.isAfter(b) ? a : b);
+            }
+        }
+
+        Instant threeDaysAgo = Instant.now().minusSeconds(3L * 24 * 60 * 60);
+        List<ReadyOrder> unclaimed = new ArrayList<>();
+        List<ClaimedOrder> claimed = new ArrayList<>();
+
+        for (DocumentSnapshot order : snapshot.getDocuments()) {
+            if (!shopId.equals(order.getString("shopId"))) continue;
+            String stage = order.getString("stage");
+            String id = order.getId();
+            String orderCode = order.getString("orderCode");
+            String customerName = order.getString("customerName");
+            BigDecimal kilos = orderQuantity(order);
+            BigDecimal totalPrice = orderPrice(order);
+            String paymentStatus = normalizePaymentStatus(order.getString("paymentStatus"));
+            String unit = orderUnit(order);
+            String billingType = orderBillingType(order);
+            BigDecimal actualWeightKg = OrderPricing.decimal(order.get("actualWeightKg"));
+
+            if ("READY".equals(stage)) {
+                Instant readyAt = readyAtByOrder.get(id);
+                // Fall back to unclaimedAt then createdAt when history is absent
+                if (readyAt == null || readyAt.equals(Instant.EPOCH)) {
+                    readyAt = instant(order.get("unclaimedAt"));
+                }
+                if (readyAt == null) readyAt = instant(order.get("createdAt"));
+                boolean overdue = readyAt != null && !readyAt.isAfter(threeDaysAgo);
+                unclaimed.add(new ReadyOrder(id, orderCode, customerName, kilos, totalPrice,
+                        paymentStatus, readyAt, overdue, unit, billingType, actualWeightKg));
+            } else if ("CLAIMED".equals(stage)) {
+                Instant claimedAt = claimedAtByOrder.get(id);
+                if (claimedAt == null) claimedAt = instant(order.get("updatedAt"));
+                claimed.add(new ClaimedOrder(id, orderCode, customerName, kilos, totalPrice,
+                        paymentStatus, claimedAt, unit, billingType, actualWeightKg));
+            }
+        }
+
+        // Unclaimed: oldest readyAt first (null last); Claimed: newest claimedAt first
+        unclaimed.sort(Comparator.comparing(ReadyOrder::readyAt, Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(ReadyOrder::id));
+        claimed.sort(Comparator.comparing(ClaimedOrder::claimedAt, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(ClaimedOrder::id));
+
+        return new ReadyAndClaimedResult(List.copyOf(unclaimed), List.copyOf(claimed));
+    }
+
+    public OwnerReport report(FirebasePrincipal principal) {        String shopId = ownerShop(principal);
         Firestore db = firebase.firestore();
         requireActive(db, shopId);
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
@@ -181,12 +280,38 @@ public class OwnerOperationsService {
         return principal.shopId();
     }
     private static BigDecimal decimal(Object value) {
-        if (value instanceof BigDecimal number) return number;
-        if (value instanceof Number number) return new BigDecimal(number.toString());
-        return BigDecimal.ZERO;
+        BigDecimal parsed = OrderPricing.decimal(value);
+        return parsed == null ? BigDecimal.ZERO : parsed;
     }
     private static Instant instant(Object value) {
         LocalDateTime dateTime = FirestoreSupport.dateTime(value);
         return dateTime == null ? null : dateTime.toInstant(ZoneOffset.UTC);
+    }
+    private static BigDecimal orderQuantity(DocumentSnapshot order) {
+        Object quantityField = order.get("quantity");
+        Object kilosField = order.get("kilos");
+        Object raw = quantityField != null ? quantityField : kilosField;
+        BigDecimal parsed = OrderPricing.decimal(raw);
+        return parsed == null ? null : parsed.setScale(2, java.math.RoundingMode.HALF_UP);
+    }
+    private static BigDecimal orderPrice(DocumentSnapshot order) {
+        return Money.fromFirestore(order.get("totalPriceCentavos"), order.get("totalPrice"));
+    }
+    private static String orderUnit(DocumentSnapshot order) {
+        String unit = order.getString("quantityUnit");
+        if (unit == null || unit.isBlank()) unit = order.getString("unit");
+        return unit == null || unit.isBlank() ? "kg" : unit;
+    }
+    private static String orderBillingType(DocumentSnapshot order) {
+        if (order.get("service") instanceof Map<?, ?> service && service.get("billingType") instanceof String configured && !configured.isBlank()) {
+            return OrderPricing.billingType(configured, null);
+        }
+        String unit = order.getString("quantityUnit");
+        if (unit == null || unit.isBlank()) unit = order.getString("unit");
+        if (unit != null && !unit.isBlank()) return OrderPricing.billingType(null, unit);
+        return order.get("kilos") != null || order.get("quantity") != null ? "PER_KG" : null;
+    }
+    private static String normalizePaymentStatus(String status) {
+        return "PAID".equals(status) || "PENDING".equals(status) ? status : "UNPAID";
     }
 }

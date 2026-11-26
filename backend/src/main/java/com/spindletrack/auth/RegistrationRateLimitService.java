@@ -48,6 +48,42 @@ public class RegistrationRateLimitService {
         return recordPublicOrderLookupAttempt(remoteAddress, Instant.now());
     }
 
+    /**
+     * Checks whether the IP is already rate-limited without writing.
+     * Called before the lookup so that blocked IPs cannot probe even with correct data.
+     */
+    public void checkPublicOrderLookupLimit(String remoteAddress) {
+        checkPublicOrderLookupLimit(remoteAddress, Instant.now());
+    }
+
+    void checkPublicOrderLookupLimit(String remoteAddress, Instant now) {
+        String ipHash = hashAddress(remoteAddress == null ? "unknown" : remoteAddress);
+        long nowEpoch = now.getEpochSecond();
+        Firestore db = firebase.firestore();
+        DocumentReference ref = db.collection("shopRegistrationRateLimits").document("orderLookup_" + ipHash);
+        DocumentSnapshot current = FirestoreSupport.await(ref.get());
+        if (!current.exists()) return;
+        Long previousStart = current.getLong("windowStartEpoch");
+        Long previousCount = current.getLong("attemptCount");
+        if (previousStart == null || previousCount == null) return;
+        long windowStart = previousStart;
+        long count = previousCount;
+        // Window expired — not blocked
+        if (nowEpoch < windowStart || nowEpoch - windowStart >= ORDER_LOOKUP_WINDOW_SECONDS) return;
+        if (count >= ORDER_LOOKUP_MAX_ATTEMPTS) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+                    "Too many order lookup attempts. Please wait 15 minutes and try again.");
+        }
+    }
+
+    /**
+     * Increments the failure counter for the IP. Called only when a lookup fails.
+     * May throw 429 if the increment reaches the limit.
+     */
+    public void recordPublicOrderLookupFailure(String remoteAddress) {
+        recordPublicOrderLookupAttempt(remoteAddress, Instant.now());
+    }
+
     public void recordPublicShopDirectoryAttempt(String remoteAddress) {
         recordSlidingWindow(remoteAddress, "shopDirectory",
                 SHOP_DIRECTORY_WINDOW_SECONDS, SHOP_DIRECTORY_MAX_ATTEMPTS,

@@ -3,6 +3,7 @@ package com.spindletrack.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Optional;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
@@ -78,6 +80,16 @@ class AuthServiceTest {
         verify(users).setSessionClaims(identity.uid(), "STAFF", "shop-45");
         assertEquals("shop-45", response.shop().id());
         assertEquals("Staff Shop", response.shop().name());
+    }
+
+    @Test
+    void unverifiedEmailIsRejectedWithoutCreatingFirestoreUser() {
+        FirebaseIdentity identity = new FirebaseIdentity("unverified-uid", "unverified@gmail.com", "Unverified", false);
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> new AuthService(users, "admin@example.com").createOrLoadSession(identity));
+        assertEquals(HttpStatus.FORBIDDEN, exception.getStatusCode());
+        assertEquals("Please verify your email before signing in.", exception.getReason());
+        verifyNoInteractions(users);
     }
 
     private static UserAccount account(String uid, String email, String role, String shopId) {

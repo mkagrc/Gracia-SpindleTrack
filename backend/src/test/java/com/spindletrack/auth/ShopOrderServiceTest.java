@@ -30,7 +30,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 class ShopOrderServiceTest {
     @Test
-    void createsOrderWithServerSelectedActiveServiceAndStaffEnteredPrice() throws Exception {
+    void createsOrderUsingStoredServicePriceAndIgnoresClientSuppliedTotal() throws Exception {
         Fixture f = new Fixture();
         when(f.counterSnapshot.exists()).thenReturn(true);
         when(f.counterSnapshot.getLong("lastNumber")).thenReturn(7L);
@@ -43,27 +43,82 @@ class ShopOrderServiceTest {
         assertEquals("Wash and fold", first.serviceName());
         assertEquals(new BigDecimal("2.35"), first.kilos());
         assertEquals("kg", first.unit());
-        assertEquals(new BigDecimal("30.75"), first.totalPrice());
+        assertEquals(new BigDecimal("35.25"), first.totalPrice());
         assertEquals(LaundryStage.RECEIVED, first.stage());
         verify(f.transaction).create(eq(f.orderRef), argThat(values -> !values.containsKey("items")
-                && !values.containsKey("total") && Long.valueOf(3075L).equals(values.get("totalPriceCentavos"))
-                && new BigDecimal("2.35").equals(values.get("quantity")) && "kg".equals(values.get("unit"))));
+                && new BigDecimal(values.get("total").toString()).compareTo(new BigDecimal("35.25")) == 0
+                && Long.valueOf(3525L).equals(values.get("totalPriceCentavos"))
+                && values.get("quantity") instanceof Number qtyNum && !(values.get("quantity") instanceof BigDecimal)
+                && new BigDecimal(qtyNum.toString()).compareTo(new BigDecimal("2.35")) == 0
+                && "kg".equals(values.get("unit"))));
         verify(f.transaction).create(eq(f.priceLogRef), any());
     }
 
     @Test
-    void orderUnitFollowsServiceForPieceAndLoadWithoutChangingStaffEnteredPrice() throws Exception {
+    void orderUnitFollowsServiceForWholePieceAndLoadQuantities() throws Exception {
         for (String unit : List.of("piece", "load")) {
             Fixture f = new Fixture();
+            String billingType = "piece".equals(unit) ? "PER_PIECE" : "PER_LOAD";
             when(f.serviceSnapshot.getString("unit")).thenReturn(unit);
             f.runTransaction();
-            ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).create(f.staff(), f.request());
+            ShopOrderService.CreateOrderRequest request = new ShopOrderService.CreateOrderRequest("  A Person  ",
+                    "+63 (917) 123-4567", "svc-string-A", new BigDecimal("2"), new BigDecimal("30.75"), "");
+            ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).create(f.staff(), request);
             assertEquals(unit, result.unit());
-            assertEquals(new BigDecimal("30.75"), result.totalPrice());
-            verify(f.transaction).create(eq(f.orderRef), argThat(values -> unit.equals(values.get("unit"))
-                    && new BigDecimal("2.35").equals(values.get("quantity"))
-                    && Long.valueOf(3075L).equals(values.get("totalPriceCentavos"))));
+            assertEquals(new BigDecimal("30.00"), result.totalPrice());
+            verify(f.transaction).create(eq(f.orderRef), argThat(values -> unit.equals(values.get("quantityUnit"))
+                    && values.get("quantity") instanceof Number quantity
+                    && new BigDecimal(quantity.toString()).compareTo(new BigDecimal("2.00")) == 0
+                    && values.get("service") instanceof Map<?, ?> service
+                    && billingType.equals(service.get("billingType"))
+                    && values.get("serviceSubtotal") instanceof Number serviceSubtotal
+                    && new BigDecimal(serviceSubtotal.toString()).compareTo(new BigDecimal("30.00")) == 0
+                    && values.get("addOnsSubtotal") instanceof Number addOnsSubtotal
+                    && new BigDecimal(addOnsSubtotal.toString()).compareTo(BigDecimal.ZERO) == 0
+                    && values.get("total") instanceof Number total
+                    && new BigDecimal(total.toString()).compareTo(new BigDecimal("30.00")) == 0));
         }
+    }
+
+    @Test
+    void addOnStockDeductionSharesOrderTransactionAndDuplicateRequestDoesNotDeductAgain() throws Exception {
+        Fixture f = new Fixture();
+        f.stubTrackedAddOn(10, 1);
+        f.runTransaction();
+        ShopOrderService.CreateOrderRequest request = f.requestWithAddOn("00000000-0000-4000-8000-000000000099", 2);
+        ShopOrderService service = new ShopOrderService(f.firebase);
+        ShopOrderService.OrderSummary created = service.create(f.staff(), request);
+        assertEquals(new BigDecimal("40.25"), created.totalPrice());
+        verify(f.transaction).update(eq(f.addOnRef), argThat(values -> Integer.valueOf(8).equals(values.get("stockOnHand"))));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> requestValues = org.mockito.ArgumentCaptor.forClass(Map.class);
+        verify(f.transaction).create(eq(f.createRequestRef), requestValues.capture());
+        when(f.createRequestSnapshot.exists()).thenReturn(true);
+        when(f.createRequestSnapshot.getString("requestFingerprint")).thenReturn((String) requestValues.getValue().get("requestFingerprint"));
+        when(f.createRequestSnapshot.getString("orderId")).thenReturn("order-id-A");
+        when(f.orders.document("order-id-A")).thenReturn(f.orderRef);
+        f.stubOwnedOrder("order-id-A", "shop-string-A", "RECEIVED");
+
+        ShopOrderService.OrderSummary replay = service.create(f.staff(), request);
+        assertEquals("order-id-A", replay.id());
+        verify(f.transaction, org.mockito.Mockito.times(1)).update(eq(f.addOnRef), any(Map.class));
+        verify(f.transaction, org.mockito.Mockito.times(1)).create(eq(f.orderRef), any(Map.class));
+    }
+
+    @Test
+    void insufficientAddOnStockReturnsConflictWithoutAnyTransactionWrites() throws Exception {
+        Fixture f = new Fixture();
+        f.stubTrackedAddOn(1, 1);
+        f.runTransaction();
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase).create(f.staff(), f.requestWithAddOn(
+                        "00000000-0000-4000-8000-000000000098", 2)));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(f.transaction, never()).update(any(DocumentReference.class), any(Map.class));
+        verify(f.transaction, never()).set(any(DocumentReference.class), any(Map.class));
+        verify(f.transaction, never()).create(any(DocumentReference.class), any());
     }
 
     @Test
@@ -86,6 +141,29 @@ class ShopOrderServiceTest {
         ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).list(f.owner(), null, null, 0).content().get(0);
         assertEquals(new BigDecimal("4.25"), result.quantity());
         assertEquals("kg", result.unit());
+    }
+
+    @Test
+    void orderWithNoKilosOrQuantityFieldReturnsNullWeight() throws Exception {
+        Fixture f = new Fixture();
+        Query query = mock(Query.class);
+        QuerySnapshot rows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot noWeight = mock(QueryDocumentSnapshot.class);
+        when(f.orders.whereEqualTo("shopId", "shop-string-A")).thenReturn(query);
+        when(query.get()).thenReturn(ApiFutures.immediateFuture(rows));
+        when(rows.getDocuments()).thenReturn(List.of(noWeight));
+        when(noWeight.getId()).thenReturn("old-order-1");
+        when(noWeight.getString("shopId")).thenReturn("shop-string-A");
+        when(noWeight.getString("orderCode")).thenReturn("O-000002");
+        when(noWeight.getString("customerName")).thenReturn("Old customer");
+        when(noWeight.getString("stage")).thenReturn("RECEIVED");
+        when(noWeight.get("kilos")).thenReturn(null);
+        when(noWeight.get("quantity")).thenReturn(null);
+        when(noWeight.get("totalPriceCentavos")).thenReturn(5000L);
+
+        ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase).list(f.owner(), null, null, 0).content().get(0);
+        assertEquals(null, result.kilos(),
+                "An order with no kilos or quantity field must return null weight, not 0.00");
     }
 
     @Test
@@ -131,13 +209,26 @@ class ShopOrderServiceTest {
         Fixture f = new Fixture();
         f.stubOwnedOrder("order-id-X", "shop-string-A", "RECEIVED");
         f.runTransaction();
-        ShopOrderService.OrderSummary moved = new ShopOrderService(f.firebase).advance(f.staff(), "order-id-X");
+        ShopOrderService service = new ShopOrderService(f.firebase);
+        ShopOrderService.OrderSummary moved = service.advance(f.staff(), "order-id-X",
+                new ShopOrderService.ExpectedStageRequest("RECEIVED", "00000000-0000-4000-8000-000000000005"));
         assertEquals(LaundryStage.WASHING, moved.stage());
         verify(f.transaction).update(eq(f.orderRef), argThat(values -> "WASHING".equals(values.get("stage"))));
         verify(f.transaction).create(eq(f.historyRef), argThat(values -> "Staff".equals(values.get("changedByName"))));
+        ResponseStatusException stale = assertThrows(ResponseStatusException.class, () -> service.advance(f.staff(), "order-id-X",
+                new ShopOrderService.ExpectedStageRequest("WASHING", "00000000-0000-4000-8000-000000000008")));
+        assertEquals(HttpStatus.CONFLICT, stale.getStatusCode());
+        when(f.stageRequestSnapshot.exists()).thenReturn(true);
+        when(f.stageRequestSnapshot.getString("expectedStage")).thenReturn("RECEIVED");
+        when(f.stageRequestSnapshot.getString("resultStage")).thenReturn("WASHING");
+        when(f.orderSnapshot.getString("stage")).thenReturn("WASHING");
+        assertEquals(LaundryStage.WASHING, service.advance(f.staff(), "order-id-X",
+                new ShopOrderService.ExpectedStageRequest("RECEIVED", "00000000-0000-4000-8000-000000000005")).stage());
+        verify(f.transaction, org.mockito.Mockito.times(1)).create(eq(f.stageRequestRef), any());
         when(f.orderSnapshot.getString("stage")).thenReturn("CLAIMED");
         ResponseStatusException finalStage = assertThrows(ResponseStatusException.class,
-                () -> new ShopOrderService(f.firebase).advance(f.staff(), "order-id-X"));
+                () -> service.advance(f.staff(), "order-id-X",
+                        new ShopOrderService.ExpectedStageRequest("CLAIMED", "00000000-0000-4000-8000-000000000006")));
         assertEquals(HttpStatus.CONFLICT, finalStage.getStatusCode());
     }
 
@@ -155,7 +246,8 @@ class ShopOrderServiceTest {
         assertEquals(HttpStatus.FORBIDDEN, assertThrows(ResponseStatusException.class,
                 () -> service.changePrice(f.owner(), "order-id-X", new ShopOrderService.PriceChangeRequest(new BigDecimal("10.00")))).getStatusCode());
         assertEquals(HttpStatus.FORBIDDEN, assertThrows(ResponseStatusException.class,
-                () -> service.advance(f.owner(), "order-id-X")).getStatusCode());
+                () -> service.advance(f.owner(), "order-id-X",
+                        new ShopOrderService.ExpectedStageRequest("RECEIVED", "00000000-0000-4000-8000-000000000007"))).getStatusCode());
     }
 
     private static final class Fixture {
@@ -165,19 +257,28 @@ class ShopOrderServiceTest {
         final CollectionReference services = mock(CollectionReference.class);
         final CollectionReference counters = mock(CollectionReference.class);
         final CollectionReference orders = mock(CollectionReference.class);
+        final CollectionReference createRequests = mock(CollectionReference.class);
+        final CollectionReference stageRequests = mock(CollectionReference.class);
         final CollectionReference history = mock(CollectionReference.class);
+        final CollectionReference addOns = mock(CollectionReference.class);
         final DocumentReference shopRef = mock(DocumentReference.class);
         final DocumentReference serviceRef = mock(DocumentReference.class);
         final DocumentReference counterRef = mock(DocumentReference.class);
         final DocumentReference orderRef = mock(DocumentReference.class);
         final DocumentReference foreignOrder = mock(DocumentReference.class);
         final DocumentReference historyRef = mock(DocumentReference.class);
+        final DocumentReference createRequestRef = mock(DocumentReference.class);
+        final DocumentReference stageRequestRef = mock(DocumentReference.class);
+        final DocumentReference addOnRef = mock(DocumentReference.class);
         final DocumentReference priceLogRef = mock(DocumentReference.class);
         final CollectionReference priceLogCollection = mock(CollectionReference.class);
         final DocumentSnapshot shopSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot serviceSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot counterSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot orderSnapshot = mock(DocumentSnapshot.class);
+        final DocumentSnapshot stageRequestSnapshot = mock(DocumentSnapshot.class);
+        final DocumentSnapshot createRequestSnapshot = mock(DocumentSnapshot.class);
+        final DocumentSnapshot addOnSnapshot = mock(DocumentSnapshot.class);
         final DocumentSnapshot foreignOrderSnapshot = mock(DocumentSnapshot.class);
         final Transaction transaction = mock(Transaction.class);
 
@@ -188,7 +289,11 @@ class ShopOrderServiceTest {
             when(db.collection("orderCounters")).thenReturn(counters);
             when(db.collection("orders")).thenReturn(orders);
             when(db.collection("orderStageHistory")).thenReturn(history);
+            when(db.collection("addOns")).thenReturn(addOns);
             when(shops.document("shop-string-A")).thenReturn(shopRef);
+            when(shopRef.collection("orderCreateRequests")).thenReturn(createRequests);
+            when(createRequests.document(any(String.class))).thenReturn(createRequestRef);
+            when(addOns.document("addon-A")).thenReturn(addOnRef);
             when(services.document("svc-string-A")).thenReturn(serviceRef);
             when(counters.document("shop-string-A")).thenReturn(counterRef);
             when(orders.document()).thenReturn(orderRef);
@@ -196,6 +301,8 @@ class ShopOrderServiceTest {
             when(orders.document("foreign-order-id")).thenReturn(foreignOrder);
             when(orderRef.getId()).thenReturn("order-id-A");
             when(history.document()).thenReturn(historyRef);
+            when(orderRef.collection("stageAdvanceRequests")).thenReturn(stageRequests);
+            when(stageRequests.document(any(String.class))).thenReturn(stageRequestRef);
             when(orderRef.collection("priceLog")).thenReturn(priceLogCollection);
             when(priceLogCollection.document()).thenReturn(priceLogRef);
             when(shopRef.get()).thenReturn(ApiFutures.immediateFuture(shopSnapshot));
@@ -207,11 +314,29 @@ class ShopOrderServiceTest {
             when(serviceSnapshot.getBoolean("active")).thenReturn(true);
             when(serviceSnapshot.getString("name")).thenReturn("Wash and fold");
             when(serviceSnapshot.getString("unit")).thenReturn("kg");
+            when(serviceSnapshot.get("pricePerUnit")).thenReturn(new BigDecimal("15.00"));
         }
 
         ShopOrderService.CreateOrderRequest request() {
             return new ShopOrderService.CreateOrderRequest("  A Person  ", "+63 (917) 123-4567", "svc-string-A",
                     new BigDecimal("2.35"), new BigDecimal("30.75"), "");
+        }
+        ShopOrderService.CreateOrderRequest requestWithAddOn(String requestId, int addOnQuantity) {
+            return new ShopOrderService.CreateOrderRequest("A Person", "+63 (917) 123-4567", "svc-string-A",
+                    new BigDecimal("2.35"), null, List.of(new ShopOrderService.AddOnSelection("addon-A", addOnQuantity)),
+                    "", null, "CASH", "PAY_AT_CLAIM", requestId);
+        }
+        void stubTrackedAddOn(int stock, int deductionPerUnit) {
+            when(addOnSnapshot.exists()).thenReturn(true);
+            when(addOnSnapshot.getString("shopId")).thenReturn("shop-string-A");
+            when(addOnSnapshot.getString("itemName")).thenReturn("Detergent sachet");
+            when(addOnSnapshot.getString("category")).thenReturn("Detergent");
+            when(addOnSnapshot.getString("unit")).thenReturn("sachet");
+            when(addOnSnapshot.get("addOnPriceCentavos")).thenReturn(250L);
+            when(addOnSnapshot.getLong("stockOnHand")).thenReturn((long) stock);
+            when(addOnSnapshot.getLong("stockDeductionPerUnit")).thenReturn((long) deductionPerUnit);
+            when(addOnSnapshot.getBoolean("trackStock")).thenReturn(true);
+            when(addOnSnapshot.getBoolean("active")).thenReturn(true);
         }
         void stubOwnedOrder(String id, String shopId, String stage) throws Exception {
             when(orderSnapshot.exists()).thenReturn(true);
@@ -233,8 +358,11 @@ class ShopOrderServiceTest {
             when(transaction.get(any(DocumentReference.class))).thenAnswer(invocation -> {
                 DocumentReference ref = invocation.getArgument(0);
                 if (ref == shopRef) return ApiFutures.immediateFuture(shopSnapshot);
+                if (ref == createRequestRef) return ApiFutures.immediateFuture(createRequestSnapshot);
+                if (ref == stageRequestRef) return ApiFutures.immediateFuture(stageRequestSnapshot);
                 if (ref == counterRef) return ApiFutures.immediateFuture(counterSnapshot);
                 if (ref == serviceRef) return ApiFutures.immediateFuture(serviceSnapshot);
+                if (ref == addOnRef) return ApiFutures.immediateFuture(addOnSnapshot);
                 if (ref == orderRef) return ApiFutures.immediateFuture(orderSnapshot);
                 return ApiFutures.immediateFuture(mock(DocumentSnapshot.class));
             });

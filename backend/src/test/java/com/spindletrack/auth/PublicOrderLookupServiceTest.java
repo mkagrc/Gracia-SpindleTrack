@@ -25,6 +25,53 @@ import org.springframework.web.server.ResponseStatusException;
 
 class PublicOrderLookupServiceTest {
     @Test
+    void orderWithNoKilosFieldReturnsNullQuantityInPublicResponse() throws Exception {
+        FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
+        RegistrationRateLimitService limits = mock(RegistrationRateLimitService.class);
+        Firestore db = mock(Firestore.class);
+        CollectionReference orders = mock(CollectionReference.class);
+        CollectionReference shops = mock(CollectionReference.class);
+        CollectionReference history = mock(CollectionReference.class);
+        Query orderQuery = mock(Query.class);
+        Query historyQuery = mock(Query.class);
+        QuerySnapshot orderRows = mock(QuerySnapshot.class);
+        QuerySnapshot stageRows = mock(QuerySnapshot.class);
+        QueryDocumentSnapshot order = mock(QueryDocumentSnapshot.class);
+        DocumentSnapshot shop = mock(DocumentSnapshot.class);
+        DocumentReference shopRef = mock(DocumentReference.class);
+
+        when(firebase.firestore()).thenReturn(db);
+        when(db.collection("orders")).thenReturn(orders);
+        when(orders.whereEqualTo("orderCode", "O-000999")).thenReturn(orderQuery);
+        when(orderQuery.get()).thenReturn(ApiFutures.immediateFuture(orderRows));
+        when(orderRows.getDocuments()).thenReturn(List.of(order));
+        when(order.getId()).thenReturn("old-order-id");
+        when(order.getString("mobile")).thenReturn("639171234567");
+        when(order.getString("shopId")).thenReturn("shop-string-1");
+        when(order.getString("stage")).thenReturn("RECEIVED");
+        when(order.getString("paymentStatus")).thenReturn("UNPAID");
+        when(order.get("kilos")).thenReturn(null);
+        when(order.get("quantity")).thenReturn(null);
+
+        when(db.collection("shops")).thenReturn(shops);
+        when(shops.document("shop-string-1")).thenReturn(shopRef);
+        when(shopRef.get()).thenReturn(ApiFutures.immediateFuture(shop));
+        when(shop.exists()).thenReturn(true);
+        when(shop.getString("status")).thenReturn("ACTIVE");
+
+        when(db.collection("orderStageHistory")).thenReturn(history);
+        when(history.whereEqualTo("shopId", "shop-string-1")).thenReturn(historyQuery);
+        when(historyQuery.whereEqualTo("orderId", "old-order-id")).thenReturn(historyQuery);
+        when(historyQuery.get()).thenReturn(ApiFutures.immediateFuture(stageRows));
+        when(stageRows.getDocuments()).thenReturn(List.of());
+
+        PublicOrderLookupService.WalkInOrder result = new PublicOrderLookupService(firebase, limits)
+                .lookup("O-000999", "639171234567", "198.51.100.9");
+
+        assertEquals(null, result.quantity(), "Legacy order with no kilos/quantity must return null, not 0.00");
+    }
+
+    @Test
     void matchingCodeAndMobileReturnsOnlyMaskedTrackingData() throws Exception {
         FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
         RegistrationRateLimitService limits = mock(RegistrationRateLimitService.class);
@@ -76,7 +123,9 @@ class PublicOrderLookupServiceTest {
         assertEquals("piece", result.unit());
         assertTrue(result.stageHistory().isEmpty());
         verify(db, never()).collection("payments");
-        verify(limits).recordPublicOrderLookupAttempt("198.51.100.9");
+        verify(limits).checkPublicOrderLookupLimit("198.51.100.9");
+        // A successful lookup must NOT increment the failure counter
+        verify(limits, org.mockito.Mockito.never()).recordPublicOrderLookupFailure(org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test

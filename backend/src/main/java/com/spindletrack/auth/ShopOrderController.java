@@ -66,8 +66,9 @@ public class ShopOrderController {
     @PostMapping("/{orderId}/payments/paymongo-link")
     @PreAuthorize("hasRole('STAFF')")
     public ShopOrderService.PaymentLinkResult createPayMongoLink(@PathVariable String orderId,
+            @Valid @RequestBody ShopOrderService.PaymentLinkRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        return orders.createPaymentLink(principal, orderId);
+        return orders.createPaymentLink(principal, orderId, request);
     }
 
     @PostMapping("/{orderId}/payments/confirm-online")
@@ -87,7 +88,8 @@ public class ShopOrderController {
     @PostMapping("/{orderId}/advance")
     @PreAuthorize("hasRole('STAFF')")
     public ShopOrderService.OrderSummary advance(@PathVariable String orderId,
+            @Valid @RequestBody ShopOrderService.ExpectedStageRequest request,
             @AuthenticationPrincipal FirebasePrincipal principal) {
-        return orders.advance(principal, orderId);
+        return orders.advance(principal, orderId, request);
     }
 }

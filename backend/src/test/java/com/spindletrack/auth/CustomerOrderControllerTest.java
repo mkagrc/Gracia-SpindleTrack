@@ -31,6 +31,24 @@ class CustomerOrderControllerTest {
     @MockitoBean UserAccountRepository users;
 
     @Test
+    void customerStageHistoryResponseNeverContainsStaffName() throws Exception {
+        ShopOrderService.CustomerOrderSummary summary = new ShopOrderService.CustomerOrderSummary(
+                "order-string-2", "O-000002", "Laundry One", "Wash", new java.math.BigDecimal("1.50"),
+                new java.math.BigDecimal("30.00"), LaundryStage.WASHING, "UNPAID", null, null,
+                java.time.Instant.now(), "kg");
+        ShopOrderService.CustomerStageEvent event = new ShopOrderService.CustomerStageEvent(
+                LaundryStage.RECEIVED, java.time.Instant.parse("2026-11-01T08:00:00Z"));
+        when(orders.getMyOrder(any(), eq("order-string-2")))
+                .thenReturn(new ShopOrderService.CustomerOrderDetail(summary, List.of(event), List.of()));
+
+        mvc.perform(get("/api/me/orders/order-string-2").with(authentication(auth("CUSTOMER"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.history[0].stage").value("RECEIVED"))
+                .andExpect(jsonPath("$.history[0].changedAt").isNotEmpty())
+                .andExpect(jsonPath("$.history[0].changedByName").doesNotExist());
+    }
+
+    @Test
     void customerCanReadOwnOrderListAndDetail() throws Exception {
         ShopOrderService.CustomerOrderSummary summary = new ShopOrderService.CustomerOrderSummary(
                 "order-string-1", "O-000001", "Laundry One", "Wash", new java.math.BigDecimal("2.00"),

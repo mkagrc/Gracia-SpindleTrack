@@ -20,7 +20,12 @@ public class OwnerShopService {
     public OwnerShopService(FirebaseAdminTokenVerifier firebase) { this.firebase = firebase; }
 
     public record ShopProfile(String id, String name, String address, String contactNumber, String status,
-            Double latitude, Double longitude) {}
+            Double latitude, Double longitude, String municipality, String province) {
+        public ShopProfile(String id, String name, String address, String contactNumber, String status,
+                Double latitude, Double longitude) {
+            this(id, name, address, contactNumber, status, latitude, longitude, null, null);
+        }
+    }
 
     public record UpdateRequest(
             @NotBlank @Size(max = 160) String name,
@@ -31,7 +36,13 @@ public class OwnerShopService {
             Double latitude,
             @DecimalMin(value = "-180.0", message = "Longitude must be between -180 and 180.")
             @DecimalMax(value =  "180.0", message = "Longitude must be between -180 and 180.")
-            Double longitude) {}
+            Double longitude,
+            @Size(max = 160) String municipality,
+            @Size(max = 160) String province) {
+        public UpdateRequest(String name, String address, String contactNumber, Double latitude, Double longitude) {
+            this(name, address, contactNumber, latitude, longitude, null, null);
+        }
+    }
 
     public ShopProfile getMine(String shopId) {
         String id = requireShopId(shopId);
@@ -57,6 +68,8 @@ public class OwnerShopService {
             // null clears the coordinates; non-null sets them
             fields.put("latitude",  request.latitude());
             fields.put("longitude", request.longitude());
+            fields.put("municipality", normalizeOptionalText(request.municipality()));
+            fields.put("province", normalizeOptionalText(request.province()));
             fields.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             tx.update(shopRef, fields);
             return null;
@@ -93,6 +106,13 @@ public class OwnerShopService {
     static ShopProfile profile(DocumentSnapshot shop) {
         return new ShopProfile(shop.getId(), shop.getString("name"), shop.getString("address"),
                 shop.getString("contactNumber"), shop.getString("status"),
-                shop.getDouble("latitude"), shop.getDouble("longitude"));
+                shop.getDouble("latitude"), shop.getDouble("longitude"),
+                shop.getString("municipality"), shop.getString("province"));
+    }
+
+    static String normalizeOptionalText(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

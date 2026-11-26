@@ -58,6 +58,11 @@ public class FirebaseBearerAuthenticationFilter extends OncePerRequestFilter {
                     && "/api/me/invitations".equals(request.getServletPath());
             FirebaseIdentity identity = invitationInboxRead
                     ? tokenVerifier.verifyForInvitationInbox(rawToken) : tokenVerifier.verify(rawToken);
+            if (!invitationInboxRead && (identity == null || !identity.emailVerified())) {
+                SecurityContextHolder.clearContext();
+                writeError(response, HttpStatus.UNAUTHORIZED, "Please verify your email before signing in.");
+                return;
+            }
             UserAccount account = identity.emailVerified()
                     ? userAccounts.findByFirebaseUid(identity.uid()).orElse(null) : null;
             if (account != null && "PLATFORM_ADMIN".equals(account.role())

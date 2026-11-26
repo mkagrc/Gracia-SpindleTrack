@@ -2,6 +2,7 @@ package com.spindletrack.auth;
 
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -21,6 +22,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
 
 @WebMvcTest(ShopServiceController.class)
 @Import(SecurityConfig.class)
@@ -46,6 +48,7 @@ class ShopServiceControllerTest {
                 .andExpect(status().isForbidden());
         verify(services).list("shop-string-A", "OWNER");
         verify(services).list("shop-string-A", "STAFF");
+        verifyNoMoreInteractions(services);
     }
 
     @Test
@@ -61,17 +64,35 @@ class ShopServiceControllerTest {
         when(services.update(eq("shop-string-A"), eq("svc-auto-id-abc"), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(new ShopServiceCatalog.ShopService("svc-auto-id-abc", "Wash", BigDecimal.TEN, "kg", true, null));
         mvc.perform(put("/api/shops/services/svc-auto-id-abc").with(authentication(auth("OWNER")))
-                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"Wash\",\"pricePerUnit\":10,\"unit\":\"kg\"}"))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"Wash\",\"category\":\"Wash\",\"billingType\":\"PER_KG\",\"pricePerUnit\":10,\"active\":true}"))
                 .andExpect(status().isOk());
         verify(services).update(eq("shop-string-A"), eq("svc-auto-id-abc"), org.mockito.ArgumentMatchers.any());
     }
 
     @Test
+    void legacyServiceUpdatePayloadWithoutCategoryIsRejectedClearly() throws Exception {
+        mvc.perform(put("/api/shops/services/svc-auto-id-abc").with(authentication(auth("OWNER")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"Wash\",\"pricePerUnit\":10,\"unit\":\"kg\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(MockMvcResultMatchers.content().string(org.hamcrest.Matchers.containsString("category")));
+    }
+
+    @Test
+    void zeroServicePriceIsAccepted() throws Exception {
+        mvc.perform(post("/api/shops/services").with(authentication(auth("OWNER")))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Wash\",\"category\":\"Wash\",\"billingType\":\"PER_KG\",\"pricePerUnit\":0,\"active\":true}"))
+                .andExpect(status().isOk());
+        verify(services).create(eq("shop-string-A"), org.mockito.ArgumentMatchers.argThat(
+                request -> BigDecimal.ZERO.compareTo(request.pricePerUnit()) == 0));
+    }
+
+    @Test
     void invalidServicePricesReturnBadRequest() throws Exception {
-        for (String price : List.of("0", "-1", "1.001", "100000.01")) {
+        for (String price : List.of("-1", "1.001", "100000.01")) {
             mvc.perform(post("/api/shops/services").with(authentication(auth("OWNER")))
                     .contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"name\":\"Wash\",\"pricePerUnit\":" + price + ",\"unit\":\"kg\"}"))
+                    .content("{\"name\":\"Wash\",\"category\":\"Wash\",\"billingType\":\"PER_KG\",\"pricePerUnit\":" + price + ",\"active\":true}"))
                     .andExpect(status().isBadRequest());
         }
         org.mockito.Mockito.verifyNoInteractions(services);

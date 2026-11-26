@@ -30,6 +30,7 @@ class PublicShopDirectoryControllerTest {
     @Autowired MockMvc mvc;
 
     @MockitoBean PublicShopDirectoryService directory;
+    @MockitoBean NominatimReverseGeocoder   geocoder;
     @MockitoBean RegistrationRateLimitService rateLimit;
     @MockitoBean PublicClientAddressResolver  addressResolver;
 
@@ -132,5 +133,52 @@ class PublicShopDirectoryControllerTest {
 
         mvc.perform(get("/api/public/shops/shop-A"))
                 .andExpect(status().isTooManyRequests());
+    }
+
+    @Test
+    void nearbyEndpointIsPublicAndReturnsMunicipalityGroups() throws Exception {
+        when(addressResolver.resolve(any())).thenReturn("127.0.0.1");
+        when(directory.nearbyGrouped(any(), any(), anyString(), any()))
+                .thenReturn(new PublicShopDirectoryService.NearbyResult(
+                        "Consolacion",
+                        List.of(new PublicShopDirectoryService.NearbyShopSummary(
+                                "shop-1", "Wash Co", "Poblacion", "1234567",
+                                10.3772, 123.9578, "Consolacion", "Cebu", BigDecimal.valueOf(0.5))),
+                        true,
+                        List.of(new PublicShopDirectoryService.MunicipalityGroup(
+                                "Liloan",
+                                List.of(new PublicShopDirectoryService.NearbyShopSummary(
+                                        "shop-2", "Liloan Suds", "Yati", "7654321",
+                                        10.4000, 123.9989, "Liloan", "Cebu", BigDecimal.valueOf(5.2)))))));
+
+        mvc.perform(get("/api/public/shops/nearby?lat=10.3772&lng=123.9578&municipality=Consolacion"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.customerMunicipality").value("Consolacion"))
+                .andExpect(jsonPath("$.hasOwnMunicipalityShops").value(true))
+                .andExpect(jsonPath("$.ownMunicipalityShops[0].shopId").value("shop-1"))
+                .andExpect(jsonPath("$.nearbyGroups[0].municipality").value("Liloan"))
+                .andExpect(jsonPath("$.nearbyGroups[0].shops[0].shopId").value("shop-2"));
+    }
+
+    @Test
+    void nearbyReturns429WhenRateLimitExceeded() throws Exception {
+        when(addressResolver.resolve(any())).thenReturn("198.51.100.7");
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many requests."))
+                .when(rateLimit).recordPublicShopDirectoryAttempt(anyString());
+
+        mvc.perform(get("/api/public/shops/nearby?municipality=Consolacion"))
+                .andExpect(status().isTooManyRequests());
+    }
+
+    @Test
+    void reverseGeocodeEndpointIsPublicAndReturnsResult() throws Exception {
+        when(addressResolver.resolve(any())).thenReturn("127.0.0.1");
+        when(geocoder.resolve(10.3772, 123.9578))
+                .thenReturn(new NominatimReverseGeocoder.GeocodeResult("Consolacion", "Cebu"));
+
+        mvc.perform(get("/api/public/shops/reverse-geocode?lat=10.3772&lng=123.9578"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.municipality").value("Consolacion"))
+                .andExpect(jsonPath("$.province").value("Cebu"));
     }
 }

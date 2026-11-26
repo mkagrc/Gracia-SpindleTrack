@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -76,6 +77,28 @@ class PublicShopDirectoryServiceTest {
         ResponseStatusException ex = assertThrows(ResponseStatusException.class,
                 () -> new PublicShopDirectoryService(f.firebase).detail("unknown-id"));
         assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+    }
+
+    @Test
+    void detailIncludesActiveCatalogsWithoutInventoryFields() {
+        ServiceFixture f = new ServiceFixture();
+        f.addShop("shop-active", "Alpha Laundry", "Manila", "ACTIVE", null, null);
+        f.addService("Wash and fold", "kg", 35.0, "Wash-Dry-Fold");
+        f.addService("Inactive service", "piece", 20.0, "Other", false);
+        f.addAddOn("Detergent sachet", "Detergent", "sachet", 250L);
+        f.addAddOn("Inactive add-on", "Other", "piece", 100L, false);
+
+        PublicShopDirectoryService.PublicShopDetail detail = new PublicShopDirectoryService(f.firebase).detail("shop-active");
+
+        assertEquals(1, detail.services().size());
+        assertEquals(List.of("Wash and fold"), detail.services().stream().map(PublicShopDirectoryService.PublicServiceEntry::name).toList());
+        assertEquals(new BigDecimal("35.00"), detail.services().get(0).referencePrice());
+        assertEquals(1, detail.addOns().size());
+        assertEquals(List.of("Detergent sachet"), detail.addOns().stream().map(PublicShopDirectoryService.PublicAddOnEntry::name).toList());
+        assertEquals("Detergent sachet", detail.addOns().get(0).name());
+        assertEquals(new BigDecimal("2.50"), detail.addOns().get(0).price());
+        assertTrue(java.util.Arrays.stream(PublicShopDirectoryService.PublicAddOnEntry.class.getRecordComponents())
+                .noneMatch(component -> List.of("stockOnHand", "stockDeductionPerUnit", "trackStock").contains(component.getName())));
     }
 
     // ── Sorting ───────────────────────────────────────────────────────────────
@@ -215,15 +238,19 @@ class PublicShopDirectoryServiceTest {
         final Firestore db                        = mock(Firestore.class);
         final CollectionReference shopsCollection = mock(CollectionReference.class);
         final CollectionReference svcsCollection  = mock(CollectionReference.class);
+        final CollectionReference addOnsCollection = mock(CollectionReference.class);
 
         // per-shop individual document references for detail() calls
         private final java.util.Map<String, DocumentSnapshot> docsByShopId = new java.util.LinkedHashMap<>();
         private final List<DocumentSnapshot> activeDocs = new ArrayList<>();
+        private final List<DocumentSnapshot> activeServiceDocs = new java.util.ArrayList<>();
+        private final List<DocumentSnapshot> activeAddOnDocs = new java.util.ArrayList<>();
 
         ServiceFixture() {
             when(firebase.firestore()).thenReturn(db);
             when(db.collection("shops")).thenReturn(shopsCollection);
             when(db.collection("services")).thenReturn(svcsCollection);
+            when(db.collection("addOns")).thenReturn(addOnsCollection);
 
             // Wire the status-filtered query to return activeDocs
             Query activeQuery = mock(Query.class);
@@ -243,13 +270,26 @@ class PublicShopDirectoryServiceTest {
             Query shopSvcQuery = mock(Query.class);
             Query activeSvcQuery = mock(Query.class);
             QuerySnapshot emptySvcSnapshot = mock(QuerySnapshot.class);
-            when(svcsCollection.whereEqualTo(anyString(), anyString())).thenReturn(shopSvcQuery);
-            when(shopSvcQuery.whereEqualTo(anyString(), anyString())).thenReturn(activeSvcQuery);
+            when(svcsCollection.whereEqualTo(eq("shopId"), anyString())).thenReturn(shopSvcQuery);
+            when(shopSvcQuery.whereEqualTo(eq("active"), eq(true))).thenReturn(activeSvcQuery);
             when(activeSvcQuery.get()).thenReturn(ApiFutures.immediateFuture(emptySvcSnapshot));
-            when(emptySvcSnapshot.getDocuments()).thenReturn(List.of());
+            when(emptySvcSnapshot.getDocuments()).thenAnswer(inv -> List.copyOf(activeServiceDocs));
+
+            Query shopAddOnQuery = mock(Query.class);
+            Query activeAddOnQuery = mock(Query.class);
+            QuerySnapshot emptyAddOnSnapshot = mock(QuerySnapshot.class);
+            when(addOnsCollection.whereEqualTo(eq("shopId"), anyString())).thenReturn(shopAddOnQuery);
+            when(shopAddOnQuery.whereEqualTo(eq("active"), eq(true))).thenReturn(activeAddOnQuery);
+            when(activeAddOnQuery.get()).thenReturn(ApiFutures.immediateFuture(emptyAddOnSnapshot));
+            when(emptyAddOnSnapshot.getDocuments()).thenAnswer(inv -> List.copyOf(activeAddOnDocs));
         }
 
         void addShop(String id, String name, String address, String status, Double lat, Double lng) {
+            addShop(id, name, address, status, lat, lng, null, null);
+        }
+
+        void addShop(String id, String name, String address, String status, Double lat, Double lng,
+                String municipality, String province) {
             DocumentSnapshot doc = mock(DocumentSnapshot.class);
             when(doc.getId()).thenReturn(id);
             when(doc.exists()).thenReturn(true);
@@ -259,6 +299,8 @@ class PublicShopDirectoryServiceTest {
             when(doc.getString("contactNumber")).thenReturn("123456789");
             when(doc.getDouble("latitude")).thenReturn(lat);
             when(doc.getDouble("longitude")).thenReturn(lng);
+            when(doc.getString("municipality")).thenReturn(municipality);
+            when(doc.getString("province")).thenReturn(province);
 
             docsByShopId.put(id, doc);
             if ("ACTIVE".equals(status)) activeDocs.add(doc);
@@ -267,6 +309,34 @@ class PublicShopDirectoryServiceTest {
             DocumentReference ref = mock(DocumentReference.class);
             when(shopsCollection.document(id)).thenReturn(ref);
             when(ref.get()).thenReturn(ApiFutures.immediateFuture(doc));
+        }
+
+        void addService(String name, String unit, double price, String category) {
+            addService(name, unit, price, category, true);
+        }
+
+        void addService(String name, String unit, double price, String category, boolean active) {
+            DocumentSnapshot row = mock(DocumentSnapshot.class);
+            when(row.getString("name")).thenReturn(name);
+            when(row.getString("unit")).thenReturn(unit);
+            when(row.getString("category")).thenReturn(category);
+            when(row.get("pricePerUnit")).thenReturn(price);
+            when(row.getBoolean("active")).thenReturn(active);
+            if (active) activeServiceDocs.add(row);
+        }
+
+        void addAddOn(String name, String category, String unit, long priceCentavos) {
+            addAddOn(name, category, unit, priceCentavos, true);
+        }
+
+        void addAddOn(String name, String category, String unit, long priceCentavos, boolean active) {
+            DocumentSnapshot row = mock(DocumentSnapshot.class);
+            when(row.getString("itemName")).thenReturn(name);
+            when(row.getString("category")).thenReturn(category);
+            when(row.getString("unit")).thenReturn(unit);
+            when(row.get("addOnPriceCentavos")).thenReturn(priceCentavos);
+            when(row.getBoolean("active")).thenReturn(active);
+            if (active) activeAddOnDocs.add(row);
         }
 
         private static final class ArrayList<T> extends java.util.ArrayList<T> {}

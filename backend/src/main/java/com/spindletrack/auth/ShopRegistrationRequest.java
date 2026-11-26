@@ -13,5 +13,12 @@ public record ShopRegistrationRequest(
         String address,
         @NotBlank(message = "Enter a contact number.")
         @Pattern(regexp = "[0-9+() .-]{7,32}", message = "Enter a valid contact number.")
-        String contactNumber) {
+        String contactNumber,
+        @Size(max = 160, message = "Municipality must be 160 characters or fewer.")
+        String municipality,
+        @Size(max = 160, message = "Province must be 160 characters or fewer.")
+        String province) {
+    public ShopRegistrationRequest(String shopName, String address, String contactNumber) {
+        this(shopName, address, contactNumber, null, null);
+    }
 }

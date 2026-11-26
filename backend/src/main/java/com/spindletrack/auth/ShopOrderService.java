@@ -11,6 +11,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
@@ -18,9 +19,12 @@ import com.google.cloud.firestore.QuerySnapshot;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.spindletrack.LaundryStage;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -54,60 +58,127 @@ public class ShopOrderService {
         this.userAccounts = userAccounts;
     }
 
+    public record AddOnSelection(@NotBlank(message = "Choose an add-on.") String addOnId,
+            @NotNull(message = "Add-on quantity is required.") @Min(value = 1, message = "Add-on quantity must be at least 1.") @Max(value = 999, message = "Add-on quantity must be no more than 999.") Integer quantity) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public record CreateOrderRequest(@NotBlank(message = "Customer name is required.") @Size(max = 120, message = "Customer name must be 120 characters or fewer.") String customerName,
             @NotBlank(message = "Customer mobile number is required.") @Size(max = 32, message = "Customer mobile number is too long.") String mobile,
             @NotBlank(message = "Choose a service.") String serviceId,
-            @JsonAlias("quantity") @NotNull(message = "Quantity is required.") @DecimalMin(value = "0.0", inclusive = false, message = "Quantity must be greater than zero.") @Digits(integer = 3, fraction = 2, message = "Quantity must be no more than 999.99 with at most 2 decimal places.") BigDecimal kilos,
-            @NotNull(message = "Total price is required.") @DecimalMin(value = "0.0", message = "Total price cannot be negative.") @Digits(integer = 6, fraction = 2, message = "Total price must be no more than 999999.99 with at most 2 decimal places.") BigDecimal totalPrice,
+            @JsonAlias("kilos") @NotNull(message = "Quantity is required.") @DecimalMin(value = "0.0", inclusive = false, message = "Quantity must be greater than zero.") @Digits(integer = 3, fraction = 2, message = "Quantity must be no more than 999.99 with at most 2 decimal places.") BigDecimal quantity,
+            @DecimalMin(value = "0.0", inclusive = false, message = "Actual weight must be greater than zero.") @Digits(integer = 3, fraction = 2, message = "Actual weight must be no more than 999.99 with at most 2 decimal places.") BigDecimal actualWeightKg,
+            @Size(max = 20, message = "An order can contain at most 20 add-on rows.") List<@Valid AddOnSelection> addOns,
             @Size(max = 1000, message = "Notes must be 1000 characters or fewer.") String notes,
-            @Email(message = "Enter a valid customer email address.") @Size(max = 254, message = "Customer email is too long.") String customerEmail) {
-        public CreateOrderRequest(String customerName, String mobile, String serviceId, BigDecimal kilos, BigDecimal totalPrice, String notes) {
-            this(customerName, mobile, serviceId, kilos, totalPrice, notes, null);
+            @Email(message = "Enter a valid customer email address.") @Size(max = 254, message = "Customer email is too long.") String customerEmail,
+            @NotBlank(message = "Choose CASH or ONLINE as the payment method.") String paymentMethodPreference,
+            @NotBlank(message = "Choose PAY_NOW or PAY_AT_CLAIM as the payment timing.") String paymentTiming,
+            @NotBlank(message = "A client request UUID is required.") String clientRequestId) {
+        public CreateOrderRequest(String customerName, String mobile, String serviceId, BigDecimal quantity, BigDecimal ignoredTotal,
+                String notes, String customerEmail) {
+            this(customerName, mobile, serviceId, quantity, null, List.of(), notes, customerEmail, "CASH", "PAY_AT_CLAIM", UUID.randomUUID().toString());
+        }
+        public CreateOrderRequest(String customerName, String mobile, String serviceId, BigDecimal quantity, BigDecimal ignoredTotal, String notes) {
+            this(customerName, mobile, serviceId, quantity, null, List.of(), notes, null, "CASH", "PAY_AT_CLAIM", UUID.randomUUID().toString());
+        }
+        public CreateOrderRequest(String customerName, String mobile, String serviceId, BigDecimal quantity, BigDecimal ignoredTotal,
+                String notes, String customerEmail, String paymentMethodPreference, String paymentTiming, String clientRequestId) {
+            this(customerName, mobile, serviceId, quantity, null, List.of(), notes, customerEmail,
+                    paymentMethodPreference, paymentTiming, clientRequestId);
         }
     }
     public record PriceChangeRequest(@NotNull(message = "Total price is required.") @DecimalMin(value = "0.0", message = "Total price cannot be negative.") @Digits(integer = 6, fraction = 2, message = "Total price must be no more than 999999.99 with at most 2 decimal places.") BigDecimal totalPrice) {}
+    public record ExpectedStageRequest(@NotBlank(message = "The current stage is required.") String expectedStage,
+            @NotBlank(message = "A client request UUID is required.") String clientRequestId) {}
+    public record PaymentLinkRequest(@NotBlank(message = "A client request UUID is required.") String clientRequestId) {}
     public record OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
             String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
             String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
             String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
-            String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference, String unit) {
+            String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference, String unit,
+            String paymentMethodPreference, String paymentTiming, String billingType, BigDecimal actualWeightKg) {
         @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
+                String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
+                String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
+                String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
+                String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference, String unit,
+                String paymentMethodPreference, String paymentTiming) {
+            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos, totalPrice,
+                    notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt, paidByUid, paidByName,
+                    paymentLinkId, paymentLinkUrl, paymentAmountCentavos, paymentOrderIdReference, unit,
+                    paymentMethodPreference, paymentTiming, OrderPricing.billingType(null, unit), null);
+        }
+        public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
+                String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
+                String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
+                String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
+                String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference, String unit) {
+            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos, totalPrice,
+                    notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt, paidByUid, paidByName,
+                    paymentLinkId, paymentLinkUrl, paymentAmountCentavos, paymentOrderIdReference, unit, "CASH", "PAY_NOW");
+        }
         public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
                 String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
                 String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
                 String paymentMethod, Instant paidAt, String paidByUid, String paidByName, String paymentLinkId,
                 String paymentLinkUrl, Long paymentAmountCentavos, String paymentOrderIdReference) {
-            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos,
-                    totalPrice, notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt,
-                    paidByUid, paidByName, paymentLinkId, paymentLinkUrl, paymentAmountCentavos,
-                    paymentOrderIdReference, "kg");
+            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos, totalPrice,
+                    notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt, paidByUid, paidByName,
+                    paymentLinkId, paymentLinkUrl, paymentAmountCentavos, paymentOrderIdReference, "kg", "CASH", "PAY_NOW");
         }
         public OrderSummary(String id, String shopId, String orderCode, String customerName, String mobile,
                 String customerUserId, String serviceId, String serviceName, BigDecimal kilos, BigDecimal totalPrice,
                 String notes, LaundryStage stage, Instant createdAt, String createdBy, String paymentStatus,
                 String paymentMethod, Instant paidAt, String paidByUid, String paidByName) {
-            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos,
-                    totalPrice, notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt,
-                    paidByUid, paidByName, null, null, null, null, "kg");
+            this(id, shopId, orderCode, customerName, mobile, customerUserId, serviceId, serviceName, kilos, totalPrice,
+                    notes, stage, createdAt, createdBy, paymentStatus, paymentMethod, paidAt, paidByUid, paidByName,
+                    null, null, null, null, "kg", "CASH", "PAY_NOW");
         }
     }
     public record PaymentLinkResult(OrderSummary order, String paymentLinkId, String paymentLinkUrl) {}
     public record StageHistory(String id, LaundryStage stage, String changedBy, String changedByName, Instant changedAt) {}
     public record PriceHistory(String id, BigDecimal previousPrice, BigDecimal newPrice, String changedByUid,
             String changedByName, Instant changedAt) {}
-    public record OrderDetail(OrderSummary order, List<StageHistory> history, List<PriceHistory> priceLog) {}
+    public record ServiceSnapshot(String id, String name, String category, String billingType,
+            BigDecimal unitPrice, BigDecimal capacityKg, String notes) {}
+    public record OrderAddOnLine(String id, String name, String unit, BigDecimal unitPrice,
+            int quantity, BigDecimal lineTotal) {}
+    public record Invoice(String shopName, String shopContactNumber, String orderCode, Instant createdAt,
+            String customerName, ServiceSnapshot service, BigDecimal quantity, String quantityUnit,
+            BigDecimal actualWeightKg, List<OrderAddOnLine> addOns, BigDecimal serviceSubtotal,
+            BigDecimal addOnsSubtotal, BigDecimal total, String paymentMethod, String paymentTiming,
+            String paymentStatus, Instant paidAt) {}
+    public record OrderDetail(OrderSummary order, List<StageHistory> history, List<PriceHistory> priceLog, Invoice invoice) {
+        public OrderDetail(OrderSummary order, List<StageHistory> history, List<PriceHistory> priceLog) {
+            this(order, history, priceLog, null);
+        }
+    }
     public record OrdersPage(List<OrderSummary> content, int number, int size, long totalElements, int totalPages) {}
     public record CustomerMatch(String name) {}
     public record CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
             BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
-            String paymentMethod, Instant paidAt, Instant createdAt, String unit) {
-        public BigDecimal quantity() { return kilos; }
+            String paymentMethod, Instant paidAt, Instant createdAt, String unit,
+            String billingType, BigDecimal actualWeightKg) {
+        @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
+        @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
+                BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
+                String paymentMethod, Instant paidAt, Instant createdAt, String unit) {
+            this(id, orderCode, shopName, serviceName, kilos, totalPrice, stage, paymentStatus,
+                    paymentMethod, paidAt, createdAt, unit, OrderPricing.billingType(null, unit), null);
+        }
     }
-    public record CustomerStageEvent(LaundryStage stage, String changedByName, Instant changedAt) {}
+    public record CustomerStageEvent(LaundryStage stage, Instant changedAt) {}
     public record CustomerPaymentEvent(String status, String method, Instant occurredAt) {}
     public record CustomerOrdersPage(List<CustomerOrderSummary> content, int number, int size, long totalElements, int totalPages) {}
     public record CustomerOrderDetail(CustomerOrderSummary order, List<CustomerStageEvent> history,
-            List<CustomerPaymentEvent> paymentHistory) {}
+            List<CustomerPaymentEvent> paymentHistory, Invoice invoice) {
+        public CustomerOrderDetail(CustomerOrderSummary order, List<CustomerStageEvent> history,
+                List<CustomerPaymentEvent> paymentHistory) {
+            this(order, history, paymentHistory, null);
+        }
+    }
 
     public CustomerMatch findCustomerForOrder(FirebasePrincipal principal, String email) {
         requireRole(principal, "STAFF");
@@ -147,11 +218,13 @@ public class ShopOrderService {
         if (!order.exists() || !userId.equals(order.getString("customerUserId")))
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order was not found.");
         String shopId = order.getString("shopId");
+        DocumentSnapshot shop = shopId == null || shopId.isBlank() ? null
+                : FirestoreSupport.await(db.collection(SHOPS).document(shopId).get());
         QuerySnapshot historyRows = FirestoreSupport.await(db.collection(HISTORY)
                 .whereEqualTo("shopId", shopId).whereEqualTo("orderId", id).get());
         List<CustomerStageEvent> history = new ArrayList<>();
         for (DocumentSnapshot row : historyRows.getDocuments())
-            history.add(new CustomerStageEvent(parseStage(row.getString("stage")), row.getString("changedByName"), instant(row.get("changedAt"))));
+            history.add(new CustomerStageEvent(parseStage(row.getString("stage")), instant(row.get("changedAt"))));
         history.sort(Comparator.comparing(CustomerStageEvent::changedAt, Comparator.nullsLast(Comparator.naturalOrder())));
         QuerySnapshot paymentRows = FirestoreSupport.await(db.collection(PAYMENTS)
                 .whereEqualTo("shopId", shopId).whereEqualTo("orderId", id).get());
@@ -163,7 +236,9 @@ public class ShopOrderService {
                     instant("PAID".equals(status) ? row.get("updatedAt") : row.get("createdAt"))));
         }
         payments.sort(Comparator.comparing(CustomerPaymentEvent::occurredAt, Comparator.nullsLast(Comparator.naturalOrder())));
-        return new CustomerOrderDetail(customerSummary(db, order), List.copyOf(history), List.copyOf(payments));
+        boolean isPaidOrder = "PAID".equals(order.getString("paymentStatus"));
+        Invoice customerInvoice = isPaidOrder ? invoice(order, shop) : null;
+        return new CustomerOrderDetail(customerSummary(db, order), List.copyOf(history), List.copyOf(payments), customerInvoice);
     }
 
     public OrdersPage list(FirebasePrincipal principal, String stageValue, String search, int page) {
@@ -211,12 +286,15 @@ public class ShopOrderService {
         for (DocumentSnapshot row : priceRows.getDocuments()) prices.add(mapPriceHistory(row));
         prices.sort(Comparator.comparing(PriceHistory::changedAt, Comparator.nullsLast(Comparator.naturalOrder()))
                 .thenComparing(PriceHistory::id));
-        return new OrderDetail(mapOrder(snapshot), List.copyOf(history), List.copyOf(prices));
+        DocumentSnapshot shopSnapshot = FirestoreSupport.await(db.collection(SHOPS).document(shopId).get());
+        requireActiveShop(shopSnapshot);
+        return new OrderDetail(mapOrder(snapshot), List.copyOf(history), List.copyOf(prices), invoice(snapshot, shopSnapshot));
     }
 
     public OrderSummary create(FirebasePrincipal principal, CreateOrderRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
+        if (request == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Order details are required.");
         String requestedCustomerName = request.customerName() == null ? "" : request.customerName().trim();
         String normalizedCustomerEmail = UserAccountRepository.normalizeEmail(request.customerEmail());
         UserAccount linkedCustomer = null;
@@ -228,9 +306,20 @@ public class ShopOrderService {
         final UserAccount resolvedCustomer = linkedCustomer;
         String mobile = normalizeMobile(request.mobile());
         String serviceId = requireId(request.serviceId());
-        BigDecimal kilos = validateKilos(request.kilos());
-        BigDecimal price = validatePrice(request.totalPrice());
+        BigDecimal quantity = validateKilos(request.quantity());
+        BigDecimal actualWeightKg = validateActualWeight(request.actualWeightKg());
+        List<AddOnSelection> requestedAddOns = request.addOns() == null ? List.of() : new ArrayList<>(request.addOns());
+        validateAddOnSelections(requestedAddOns);
+        final List<AddOnSelection> addOnSelections = List.copyOf(requestedAddOns);
+        String paymentMethodPreference = validatePaymentMethodPreference(request.paymentMethodPreference());
+        String paymentTiming = validatePaymentTiming(request.paymentTiming());
+        String clientRequestId = validateClientRequestId(request.clientRequestId());
         String notes = request.notes() == null ? "" : request.notes().trim();
+        String addOnFingerprint = addOnSelections.stream().map(line -> line.addOnId() + ":" + line.quantity()).reduce((a, b) -> a + "," + b).orElse("");
+        String requestFingerprint = orderRequestFingerprint(requestedCustomerName, mobile, serviceId, quantity.toPlainString(),
+                actualWeightKg == null ? "" : actualWeightKg.toPlainString(), addOnFingerprint, notes, normalizedCustomerEmail,
+                paymentMethodPreference, paymentTiming);
+
         if (mobile.length() < 7 || mobile.length() > 15) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter a valid mobile number with 7 to 15 digits.");
 
         Firestore db = firebase.firestore();
@@ -238,6 +327,8 @@ public class ShopOrderService {
         DocumentReference counter = db.collection(COUNTERS).document(shopId);
         DocumentReference service = db.collection(SERVICES).document(serviceId);
         DocumentReference customer = resolvedCustomer == null ? null : db.collection("users").document(resolvedCustomer.id());
+        var requestCollection = shop.collection("orderCreateRequests");
+        DocumentReference requestKey = requestCollection == null ? null : requestCollection.document(clientRequestId);
         DocumentReference order = db.collection(ORDERS).document();
         DocumentReference stageHistory = db.collection(HISTORY).document();
         DocumentReference priceHistory = order.collection(PRICE_LOG).document();
@@ -248,11 +339,25 @@ public class ShopOrderService {
 
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
+            requireActiveShop(shopSnapshot);
+            DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
+            if (requestSnapshot != null && requestSnapshot.exists()) {
+                if (!requestFingerprint.equals(requestSnapshot.getString("requestFingerprint")))
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "This client request UUID was already used for different order details.");
+                String existingOrderId = requestSnapshot.getString("orderId");
+                if (existingOrderId == null || existingOrderId.isBlank())
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "The prior order request needs reconciliation.");
+                DocumentSnapshot existingOrder = FirestoreSupport.await(tx.get(db.collection(ORDERS).document(existingOrderId)));
+                requireOwned(existingOrder, shopId);
+                return mapOrder(existingOrder);
+            }
             DocumentSnapshot counterSnapshot = FirestoreSupport.await(tx.get(counter));
             DocumentSnapshot serviceSnapshot = FirestoreSupport.await(tx.get(service));
             DocumentSnapshot customerSnapshot = customer == null ? null : FirestoreSupport.await(tx.get(customer));
-            requireActiveShop(shopSnapshot);
             requireActiveService(serviceSnapshot, shopId);
+            if ((serviceSnapshot.getString("billingType") == null || serviceSnapshot.getString("billingType").isBlank())
+                    && (serviceSnapshot.getString("unit") == null || serviceSnapshot.getString("unit").isBlank()))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service has no billing unit. Update the service before creating an order.");
             if (customerSnapshot != null && (!customerSnapshot.exists()
                     || !Boolean.TRUE.equals(customerSnapshot.getBoolean("active"))
                     || !Boolean.TRUE.equals(customerSnapshot.getBoolean("emailVerified"))
@@ -263,11 +368,72 @@ public class ShopOrderService {
             String customerName = customerSnapshot == null ? requestedCustomerName
                     : firstNonBlank(customerSnapshot.getString("displayName"), customerSnapshot.getString("fullName"));
             if (customerName.isBlank()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No verified customer account matches that email.");
+            String billingType = OrderPricing.billingType(serviceSnapshot.getString("billingType"), serviceSnapshot.getString("unit"));
+            if (!List.of("PER_KG", "PER_LOAD", "PER_PIECE", "FLAT").contains(billingType))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service has an unsupported billing type.");
+            OrderPricing.validateQuantity(billingType, quantity);
+            if (actualWeightKg != null && !"PER_LOAD".equals(billingType))
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Actual weight is only available for per-load services.");
+            BigDecimal serviceUnitPrice = requireCatalogPrice(serviceSnapshot.get("pricePerUnit"), "Service");
+            BigDecimal capacityKg = OrderPricing.decimal(serviceSnapshot.get("capacityKg"));
+            BigDecimal minimumKg = OrderPricing.decimal(serviceSnapshot.get("minimumKg"));
+            if (capacityKg != null && (capacityKg.compareTo(BigDecimal.ZERO) <= 0 || capacityKg.compareTo(MAX_KILOS) > 0 || capacityKg.scale() > 2))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service has an invalid load capacity.");
+            if (minimumKg != null && (minimumKg.compareTo(BigDecimal.ZERO) <= 0 || minimumKg.compareTo(MAX_KILOS) > 0 || minimumKg.scale() > 2))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service has an invalid minimum weight.");
+            if (!"PER_KG".equals(billingType)) minimumKg = null;
+            if (actualWeightKg != null && capacityKg != null
+                    && actualWeightKg.compareTo(capacityKg.multiply(quantity)) > 0)
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Actual weight exceeds the selected service's combined load capacity.");
+            String unit = OrderPricing.unit(billingType);
+            BigDecimal serviceSubtotal = OrderPricing.serviceSubtotal(billingType, serviceUnitPrice, quantity, minimumKg);
+            List<DocumentSnapshot> addOnSnapshots = new ArrayList<>();
+            Map<String, Long> stockDeductions = new HashMap<>();
+            Map<String, DocumentReference> stockReferences = new HashMap<>();
+            List<OrderAddOnLine> addOnLines = new ArrayList<>();
+            List<Map<String, Object>> addOnValues = new ArrayList<>();
+            BigDecimal addOnsSubtotal = BigDecimal.ZERO.setScale(2);
+            for (AddOnSelection selected : addOnSelections) {
+                DocumentReference addOnRef = db.collection("addOns").document(selected.addOnId());
+                DocumentSnapshot addOnSnapshot = FirestoreSupport.await(tx.get(addOnRef));
+                requireActiveAddOn(addOnSnapshot, shopId);
+                ShopAddOnCatalog.AddOn addOn = ShopAddOnCatalog.map(addOnSnapshot);
+                BigDecimal addOnPrice = OrderPricing.money(addOn.addOnPrice());
+                BigDecimal lineTotal = OrderPricing.lineTotal(addOnPrice, BigDecimal.valueOf(selected.quantity()));
+                addOnSnapshots.add(addOnSnapshot);
+                addOnLines.add(new OrderAddOnLine(addOn.id(), addOn.itemName(), addOn.unit(), addOnPrice,
+                        selected.quantity(), lineTotal));
+                Map<String, Object> line = new HashMap<>();
+                line.put("id", addOn.id()); line.put("name", addOn.itemName()); line.put("unit", addOn.unit());
+                line.put("unitPrice", addOnPrice.doubleValue()); line.put("quantity", selected.quantity());
+                line.put("lineTotal", lineTotal.doubleValue());
+                addOnValues.add(line);
+                addOnsSubtotal = addOnsSubtotal.add(lineTotal).setScale(2, RoundingMode.HALF_UP);
+                if (addOn.trackStock()) {
+                    if (addOn.stockOnHand() == null || addOn.stockOnHand() < 0)
+                        throw new ResponseStatusException(HttpStatus.CONFLICT, "Stock tracking is enabled but stock is unavailable for " + addOn.itemName() + ".");
+                    long deduction = (long) addOn.stockDeductionPerUnit() * selected.quantity();
+                    stockDeductions.merge(addOn.id(), deduction, Long::sum);
+                    stockReferences.put(addOn.id(), addOnRef);
+                }
+            }
+            Map<String, Integer> remainingStock = new HashMap<>();
+            for (int i = 0; i < addOnSelections.size(); i++) {
+                AddOnSelection selected = addOnSelections.get(i);
+                ShopAddOnCatalog.AddOn addOn = ShopAddOnCatalog.map(addOnSnapshots.get(i));
+                if (!addOn.trackStock() || remainingStock.containsKey(addOn.id())) continue;
+                long deduction = stockDeductions.getOrDefault(addOn.id(), 0L);
+                if (deduction > addOn.stockOnHand())
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "Insufficient stock for " + addOn.itemName() + ". Available: " + addOn.stockOnHand() + ".");
+                remainingStock.put(addOn.id(), Math.toIntExact(addOn.stockOnHand() - deduction));
+            }
+            BigDecimal total = serviceSubtotal.add(addOnsSubtotal).setScale(2, RoundingMode.HALF_UP);
+            if (total.compareTo(MAX_PRICE) > 0)
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Computed order total exceeds PHP 999999.99.");
             long nextNumber = (counterSnapshot.exists() && counterSnapshot.getLong("lastNumber") != null
                     ? counterSnapshot.getLong("lastNumber") : 0L) + 1L;
             String code = "O-" + String.format(Locale.ROOT, "%06d", nextNumber);
             String serviceName = serviceSnapshot.getString("name");
-            String unit = serviceUnit(serviceSnapshot);
             Map<String, Object> orderValues = new HashMap<>();
             orderValues.put("shopId", shopId);
             orderValues.put("orderCode", code);
@@ -276,10 +442,25 @@ public class ShopOrderService {
             orderValues.put("customerUserId", resolvedCustomer == null ? null : resolvedCustomer.id());
             orderValues.put("serviceId", serviceId);
             orderValues.put("serviceName", serviceName);
-            orderValues.put("quantity", kilos);
+            Map<String, Object> serviceValues = new HashMap<>();
+            serviceValues.put("id", serviceId); serviceValues.put("name", serviceName);
+            serviceValues.put("category", first(serviceSnapshot.getString("category"), "Other"));
+            serviceValues.put("billingType", billingType); serviceValues.put("unitPrice", serviceUnitPrice.doubleValue());
+            serviceValues.put("capacityKg", capacityKg == null ? null : capacityKg.doubleValue());
+            serviceValues.put("notes", first(serviceSnapshot.getString("notes"), ""));
+            orderValues.put("service", serviceValues);
+            orderValues.put("quantity", quantity.doubleValue());
+            orderValues.put("quantityUnit", unit);
             orderValues.put("unit", unit);
-            orderValues.put("kilos", kilos);
-            orderValues.put("totalPriceCentavos", Money.toCentavos(price));
+            if ("PER_KG".equals(billingType)) orderValues.put("kilos", quantity.doubleValue());
+            if (actualWeightKg != null) orderValues.put("actualWeightKg", actualWeightKg.doubleValue());
+            orderValues.put("addOns", List.copyOf(addOnValues));
+            orderValues.put("serviceSubtotal", serviceSubtotal.doubleValue());
+            orderValues.put("addOnsSubtotal", addOnsSubtotal.doubleValue());
+            orderValues.put("total", total.doubleValue());
+            orderValues.put("paymentMethodPreference", paymentMethodPreference);
+            orderValues.put("paymentTiming", paymentTiming);
+            orderValues.put("totalPriceCentavos", Money.toCentavos(total));
             orderValues.put("notes", notes);
             orderValues.put("stage", LaundryStage.RECEIVED.name());
             orderValues.put("paymentStatus", "UNPAID");
@@ -289,14 +470,18 @@ public class ShopOrderService {
             orderValues.put("paidByName", null);
             orderValues.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             orderValues.put("createdBy", changedBy);
-            Map<String, Object> priceValues = priceHistoryValues(null, price, changedByUid, changedByName);
+            Map<String, Object> priceValues = priceHistoryValues(null, total, changedByUid, changedByName);
+            for (Map.Entry<String, Integer> stock : remainingStock.entrySet())
+                tx.update(stockReferences.get(stock.getKey()), Map.of("stockOnHand", stock.getValue(),
+                        "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             tx.set(counter, Map.of("shopId", shopId, "lastNumber", nextNumber));
             tx.create(order, orderValues);
+            if (requestKey != null) tx.create(requestKey, Map.of("shopId", shopId, "requestFingerprint", requestFingerprint, "orderId", order.getId(), "createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             tx.create(stageHistory, historyValues(shopId, order.getId(), LaundryStage.RECEIVED, changedBy, changedByName));
             tx.create(priceHistory, priceValues);
             return new OrderSummary(order.getId(), shopId, code, customerName, mobile, resolvedCustomer == null ? null : resolvedCustomer.id(), serviceId, serviceName,
-                    kilos, price, notes, LaundryStage.RECEIVED, createdAt, changedBy, "UNPAID", null, null, null, null,
-                    null, null, null, null, unit);
+                    quantity, total, notes, LaundryStage.RECEIVED, createdAt, changedBy, "UNPAID", null, null, null, null,
+                    null, null, null, null, unit, paymentMethodPreference, paymentTiming, billingType, actualWeightKg);
         });
     }
 
@@ -334,12 +519,20 @@ public class ShopOrderService {
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
-        DocumentReference paymentRef = db.collection(PAYMENTS).document();
+        DocumentReference paymentRef = db.collection(PAYMENTS).document("cash-" + id);
         String paidByUid = principal.uid();
         String paidByName = displayName(principal);
         Instant paidAt = Instant.now();
         DocumentSnapshot before = FirestoreSupport.await(order.get());
         requireOwned(before, shopId);
+        requireActiveShop(FirestoreSupport.await(shop.get()));
+        if (isPaid(before)) {
+            if ("CASH".equals(before.getString("paymentMethod"))) return mapOrder(before);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid online.");
+        }
+        if (paymentMethodPreference(before) != null && !"CASH".equals(paymentMethodPreference(before)))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for online payment.");
+        requirePaymentTiming(before);
         String pendingLinkId = "PENDING".equals(paymentStatus(before)) ? before.getString("paymentLinkId") : null;
         if (pendingLinkId != null && !pendingLinkId.isBlank()) {
             PayMongoGateway.VerifiedPayment alreadyPaid = gateway().findPaidPayment(pendingLinkId);
@@ -356,9 +549,17 @@ public class ShopOrderService {
         OrderSummary result = FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+            DocumentSnapshot existingCashPayment = FirestoreSupport.await(tx.get(paymentRef));
             requireActiveShop(shopSnapshot);
             requireOwned(current, shopId);
-            if (isPaid(current)) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
+            if (isPaid(current)) {
+                if ("CASH".equals(current.getString("paymentMethod"))) return mapOrder(current);
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
+            }
+            if (paymentMethodPreference(current) != null && !"CASH".equals(paymentMethodPreference(current)))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for online payment.");
+            requirePaymentTiming(current);
+            if (existingCashPayment.exists()) throw new ResponseStatusException(HttpStatus.CONFLICT, "A cash payment record already exists for this unpaid order; reconcile it before retrying.");
             if ("PENDING".equals(paymentStatus(current)) && !java.util.Objects.equals(pendingLinkId, current.getString("paymentLinkId")))
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "The payment link changed. Refresh the order and try again.");
             Map<String, Object> update = new HashMap<>();
@@ -379,35 +580,67 @@ public class ShopOrderService {
         return result;
     }
 
-    public PaymentLinkResult createPaymentLink(FirebasePrincipal principal, String orderId) {
+    public PaymentLinkResult createPaymentLink(FirebasePrincipal principal, String orderId, PaymentLinkRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
         String id = requireId(orderId);
+        String clientRequestId = validateClientRequestId(request == null ? null : request.clientRequestId());
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
-        DocumentSnapshot initialShop = FirestoreSupport.await(shop.get());
+        var requestCollection = order.collection("paymentLinkRequests");
+        DocumentReference requestKey = requestCollection == null ? null : requestCollection.document(clientRequestId);
+        PaymentLinkResult replay = FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+            DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
+            requireActiveShop(shopSnapshot);
+            requireOwned(current, shopId);
+            if (requestSnapshot != null && requestSnapshot.exists()) {
+                if ("COMPLETED".equals(requestSnapshot.getString("status")))
+                    return new PaymentLinkResult(mapOrder(current), requestSnapshot.getString("paymentLinkId"), requestSnapshot.getString("paymentLinkUrl"));
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This payment-link request is already being processed. Refresh before retrying.");
+            }
+            if ("PENDING".equals(paymentStatus(current))) {
+                String existingId = current.getString("paymentLinkId");
+                String existingUrl = current.getString("paymentLinkUrl");
+                if (existingId != null && existingUrl != null) return new PaymentLinkResult(mapOrder(current), existingId, existingUrl);
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment link needs reconciliation.");
+            }
+            if (!"UNPAID".equals(paymentStatus(current)))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "A payment link can be created only for an unpaid order.");
+            if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for cash payment.");
+            requirePaymentTiming(current);
+            long cents = Money.toCentavos(orderPrice(current));
+            if (cents < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayMongo payment links require a total of at least ₱1.00.");
+            if (requestKey != null) tx.create(requestKey, Map.of("shopId", shopId, "orderId", id, "status", "CREATING",
+                    "amountCentavos", cents, "createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+            return null;
+        });
+        if (replay != null) return replay;
         DocumentSnapshot initialOrder = FirestoreSupport.await(order.get());
-        requireActiveShop(initialShop);
-        requireOwned(initialOrder, shopId);
-        if (!"UNPAID".equals(paymentStatus(initialOrder)))
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "A payment link can be created only for an unpaid order.");
         BigDecimal total = orderPrice(initialOrder);
         long amountCentavos = Money.toCentavos(total);
-        if (amountCentavos < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayMongo payment links require a total of at least ₱1.00.");
         PayMongoGateway.CreatedLink link = gateway().createPaymentLink(amountCentavos, id, initialOrder.getString("orderCode"));
         if (link.amountCentavos() != amountCentavos || !"PHP".equals(link.currency())) {
             try { gateway().archivePaymentLink(link.id()); } catch (RuntimeException ignored) { }
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "PayMongo returned a link with an unexpected amount or currency.");
         }
-        DocumentReference payment = db.collection(PAYMENTS).document();
+        DocumentReference payment = db.collection(PAYMENTS).document("online-" + clientRequestId);
         String paymentRecordId = payment.getId();
         try {
             OrderSummary updated = FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+                DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
                 requireActiveShop(shopSnapshot);
                 requireOwned(current, shopId);
+                if (requestSnapshot != null && requestSnapshot.exists() && "COMPLETED".equals(requestSnapshot.getString("status")))
+                    return mapOrder(current);
+                if (!"ONLINE".equals(paymentMethodPreference(current)))
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is no longer configured for online payment.");
+                requirePaymentTiming(current);
                 if (!"UNPAID".equals(paymentStatus(current)) || orderPrice(current).compareTo(total) != 0)
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "The order changed before its payment link was created. Refresh and try again.");
                 Map<String, Object> values = new HashMap<>();
@@ -417,6 +650,8 @@ public class ShopOrderService {
                 values.put("paymentRecordId", paymentRecordId);
                 values.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
                 tx.update(order, values);
+                if (requestKey != null) tx.update(requestKey, Map.of("status", "COMPLETED", "paymentLinkId", link.id(), "paymentLinkUrl", link.url(),
+                        "completedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
                 tx.create(payment, paymentRecord(shopId, id, total, "ONLINE", "PENDING", principal.uid(), displayName(principal), link.id()));
                 return withLink(mapOrder(current), link.id(), link.url(), amountCentavos, id);
             });
@@ -425,6 +660,11 @@ public class ShopOrderService {
             try { gateway().archivePaymentLink(link.id()); } catch (RuntimeException ignored) { }
             throw exception;
         }
+    }
+
+    /** Compatibility entry point for older in-process callers; HTTP callers must provide a request UUID. */
+    public PaymentLinkResult createPaymentLink(FirebasePrincipal principal, String orderId) {
+        return createPaymentLink(principal, orderId, new PaymentLinkRequest(UUID.randomUUID().toString()));
     }
 
     public OrderSummary confirmOnlinePayment(FirebasePrincipal principal, String orderId) {
@@ -560,13 +800,18 @@ public class ShopOrderService {
         });
     }
 
-    public OrderSummary advance(FirebasePrincipal principal, String orderId) {
+    public OrderSummary advance(FirebasePrincipal principal, String orderId, ExpectedStageRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
         String id = requireId(orderId);
+        LaundryStage expected = parseStage(request == null ? null : request.expectedStage());
+        if (expected == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The expected stage is invalid.");
+        String clientRequestId = validateClientRequestId(request.clientRequestId());
         Firestore db = firebase.firestore();
         DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
+        var requestCollection = order.collection("stageAdvanceRequests");
+        DocumentReference requestKey = requestCollection == null ? null : requestCollection.document(clientRequestId);
         DocumentReference history = db.collection(HISTORY).document();
         String changedBy = userId(principal);
         String changedByName = displayName(principal);
@@ -574,9 +819,19 @@ public class ShopOrderService {
         return FirestoreSupport.transact(db, tx -> {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+            DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
             requireActiveShop(shopSnapshot);
             requireOwned(current, shopId);
+            if (requestSnapshot != null && requestSnapshot.exists()) {
+                if (!expected.name().equals(requestSnapshot.getString("expectedStage")))
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "This client request UUID was already used for a different stage transition.");
+                LaundryStage storedResult = parseStage(requestSnapshot.getString("resultStage"));
+                if (storedResult == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "The prior stage request needs reconciliation.");
+                return replaceStage(mapOrder(current), storedResult);
+            }
             LaundryStage stage = parseStage(current.getString("stage"));
+            if (stage == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "The order has an invalid stage and cannot be advanced.");
+            if (stage != expected) throw new ResponseStatusException(HttpStatus.CONFLICT, "The order stage changed. Refresh before advancing it.");
             if (stage == LaundryStage.CLAIMED) throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already at the final stage, Claimed.");
             LaundryStage next = stage.next();
             if (next == LaundryStage.CLAIMED && !isPaid(current)) {
@@ -588,6 +843,8 @@ public class ShopOrderService {
             if (next == LaundryStage.READY) stageUpdate.put("readyAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
             tx.update(order, stageUpdate);
             tx.create(history, historyValues(shopId, id, next, changedBy, changedByName));
+            if (requestKey != null) tx.create(requestKey, Map.of("shopId", shopId, "orderId", id, "expectedStage", expected.name(),
+                    "resultStage", next.name(), "createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
             if (next == LaundryStage.READY && current.getString("customerUserId") != null
                     && !current.getString("customerUserId").isBlank()) {
                 DocumentReference notification = db.collection("notificationOutbox").document(id + "_READY");
@@ -605,9 +862,94 @@ public class ShopOrderService {
         });
     }
 
+    /** Compatibility entry point for older in-process callers; HTTP callers must provide expectedStage. */
+    public OrderSummary advance(FirebasePrincipal principal, String orderId) {
+        requireRole(principal, "STAFF");
+        String shopId = requireShop(principal.shopId());
+        DocumentSnapshot current = FirestoreSupport.await(firebase.firestore().collection(ORDERS).document(requireId(orderId)).get());
+        requireOwned(current, shopId);
+        LaundryStage currentStage = parseStage(current.getString("stage"));
+        if (currentStage == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "The order has an invalid stage and cannot be advanced.");
+        return advance(principal, orderId, new ExpectedStageRequest(currentStage.name(), UUID.randomUUID().toString()));
+    }
+
     private static void requireActiveService(DocumentSnapshot service, String shopId) {
         if (!service.exists() || !shopId.equals(service.getString("shopId"))) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "The selected service was not found in this shop.");
         if (!Boolean.TRUE.equals(service.getBoolean("active"))) throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected service is no longer active. Refresh the service list and try again.");
+    }
+
+    private static void validateAddOnSelections(List<AddOnSelection> selections) {
+        if (selections == null || selections.size() > 20)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "An order can contain at most 20 add-on rows.");
+        for (AddOnSelection selection : selections) {
+            if (selection == null || selection.addOnId() == null || selection.addOnId().isBlank()
+                    || selection.addOnId().contains("/") || selection.quantity() == null
+                    || selection.quantity() < 1 || selection.quantity() > 999)
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Each add-on needs a valid ID and quantity from 1 to 999.");
+        }
+    }
+
+    private static void requireActiveAddOn(DocumentSnapshot addOn, String shopId) {
+        if (!addOn.exists() || !shopId.equals(addOn.getString("shopId")))
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "The selected add-on was not found in this shop.");
+        if (!Boolean.TRUE.equals(addOn.getBoolean("active")))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected add-on is no longer active. Refresh the add-on list and try again.");
+    }
+
+    private static BigDecimal requireCatalogPrice(Object raw, String label) {
+        BigDecimal price = OrderPricing.decimal(raw);
+        if (price == null || price.compareTo(BigDecimal.ZERO) < 0 || price.compareTo(MAX_PRICE) > 0)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The selected " + label.toLowerCase(Locale.ROOT) + " has an invalid catalog price.");
+        return OrderPricing.money(price);
+    }
+
+    private static BigDecimal validateActualWeight(BigDecimal value) {
+        if (value == null) return null;
+        if (value.compareTo(BigDecimal.ZERO) <= 0 || value.compareTo(MAX_KILOS) > 0 || value.scale() > 2)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Actual weight must be greater than 0 and no more than 999.99 kg, with at most 2 decimal places.");
+        return value.setScale(2, RoundingMode.UNNECESSARY);
+    }
+
+    private static Invoice invoice(DocumentSnapshot order, DocumentSnapshot shop) {
+        Map<?, ?> service = order.get("service") instanceof Map<?, ?> values ? values : Map.of();
+        String billingType = first(string(service.get("billingType")), OrderPricing.billingType(null, orderUnit(order)));
+        BigDecimal quantity = orderQuantity(order);
+        BigDecimal addOnsSubtotal = nullableDecimal(order.get("addOnsSubtotal"));
+        if (addOnsSubtotal == null) addOnsSubtotal = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+        Object rawAddOns = order.get("addOns");
+        List<OrderAddOnLine> addOns = new ArrayList<>();
+        if (rawAddOns instanceof List<?> values) for (Object raw : values) {
+            if (!(raw instanceof Map<?, ?> line)) continue;
+            String id = string(line.get("id"));
+            String name = string(line.get("name"));
+            String unit = string(line.get("unit"));
+            BigDecimal unitPrice = nullableDecimal(line.get("unitPrice"));
+            BigDecimal lineTotal = nullableDecimal(line.get("lineTotal"));
+            Object lineQuantity = line.get("quantity");
+            int count = lineQuantity instanceof Number number ? number.intValue() : 0;
+            addOns.add(new OrderAddOnLine(id, name, unit, unitPrice, count, lineTotal));
+        }
+        BigDecimal total = orderPrice(order);
+        BigDecimal serviceSubtotal = nullableDecimal(order.get("serviceSubtotal"));
+        if (serviceSubtotal == null) serviceSubtotal = total.subtract(addOnsSubtotal).setScale(2, RoundingMode.HALF_UP);
+        ServiceSnapshot serviceSnapshot = new ServiceSnapshot(
+                first(string(service.get("id")), order.getString("serviceId")),
+                first(string(service.get("name")), order.getString("serviceName")),
+                first(string(service.get("category")), "Other"), billingType,
+                nullableDecimal(service.get("unitPrice")), nullableDecimal(service.get("capacityKg")),
+                first(string(service.get("notes")), ""));
+        String paymentMethod = order.getString("paymentMethod");
+        if (paymentMethod == null) paymentMethod = paymentMethodPreference(order);
+        return new Invoice(first(shop == null ? null : shop.getString("name"), "Laundry shop"), first(shop == null ? null : shop.getString("contactNumber"), ""),
+                order.getString("orderCode"), instant(order.get("createdAt")), order.getString("customerName"),
+                serviceSnapshot, quantity, first(order.getString("quantityUnit"), orderUnit(order)),
+                nullableDecimal(order.get("actualWeightKg")), List.copyOf(addOns), serviceSubtotal, addOnsSubtotal,
+                total, paymentMethod, paymentTiming(order), paymentStatus(order), instant(order.get("paidAt")));
+    }
+
+    private static String string(Object value) { return value instanceof String text ? text : null; }
+    private static String first(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback == null ? "" : fallback : value;
     }
 
     private static Map<String, Object> historyValues(String shopId, String orderId, LaundryStage stage, String changedBy, String changedByName) {
@@ -656,7 +998,8 @@ public class ShopOrderService {
         return new CustomerOrderSummary(order.getId(), order.getString("orderCode"), shopName,
                 order.getString("serviceName"), orderQuantity(order), orderPrice(order),
                 parseStage(order.getString("stage")), paymentStatus(order), order.getString("paymentMethod"),
-                instant(order.get("paidAt")), instant(order.get("createdAt")), orderUnit(order));
+                instant(order.get("paidAt")), instant(order.get("createdAt")), orderUnit(order),
+                orderBillingType(order), nullableDecimal(order.get("actualWeightKg")));
     }
 
     private static OrderSummary mapOrder(DocumentSnapshot snapshot) {
@@ -668,7 +1011,9 @@ public class ShopOrderService {
                 instant(snapshot.get("createdAt")), snapshot.getString("createdBy"), paymentStatus(snapshot),
                 snapshot.getString("paymentMethod"), instant(snapshot.get("paidAt")), snapshot.getString("paidByUid"),
                 snapshot.getString("paidByName"), snapshot.getString("paymentLinkId"), snapshot.getString("paymentLinkUrl"),
-                snapshot.getLong("paymentAmountCentavos"), snapshot.getString("paymentOrderIdReference"), orderUnit(snapshot));
+                snapshot.getLong("paymentAmountCentavos"), snapshot.getString("paymentOrderIdReference"), orderUnit(snapshot),
+                paymentMethodPreference(snapshot), paymentTiming(snapshot),
+                orderBillingType(snapshot), nullableDecimal(snapshot.get("actualWeightKg")));
     }
 
     private static StageHistory mapHistory(DocumentSnapshot snapshot) {
@@ -685,30 +1030,35 @@ public class ShopOrderService {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), stage, order.createdAt(), order.createdBy(),
                 order.paymentStatus(), order.paymentMethod(), order.paidAt(), order.paidByUid(), order.paidByName(), order.paymentLinkId(),
-                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit());
+                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit(),
+                order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
     private static OrderSummary replacePrice(OrderSummary order, BigDecimal price) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), price, order.notes(), order.stage(), order.createdAt(), order.createdBy(),
                 order.paymentStatus(), order.paymentMethod(), order.paidAt(), order.paidByUid(), order.paidByName(), order.paymentLinkId(),
-                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference());
+                order.paymentLinkUrl(), order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit(),
+                order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
     private static OrderSummary withPayment(OrderSummary order, String status, String method, Instant paidAt, String uid, String name) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
                 order.createdBy(), status, method, paidAt, uid, name, order.paymentLinkId(), order.paymentLinkUrl(),
-                order.paymentAmountCentavos(), order.paymentOrderIdReference());
+                order.paymentAmountCentavos(), order.paymentOrderIdReference(), order.unit(), order.paymentMethodPreference(), order.paymentTiming(),
+                order.billingType(), order.actualWeightKg());
     }
     private static OrderSummary withLink(OrderSummary order, String linkId, String url, long amount, String orderReference) {
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
-                order.createdBy(), "PENDING", "ONLINE", order.paidAt(), order.paidByUid(), order.paidByName(), linkId, url, amount, orderReference, order.unit());
+                order.createdBy(), "PENDING", "ONLINE", order.paidAt(), order.paidByUid(), order.paidByName(), linkId, url, amount,
+                orderReference, order.unit(), order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
     private static OrderSummary mapOrderAfterPaymentReset(DocumentSnapshot current) {
         OrderSummary order = mapOrder(current);
         return new OrderSummary(order.id(), order.shopId(), order.orderCode(), order.customerName(), order.mobile(), order.customerUserId(),
                 order.serviceId(), order.serviceName(), order.kilos(), order.totalPrice(), order.notes(), order.stage(), order.createdAt(),
-                order.createdBy(), "UNPAID", null, null, null, null);
+                order.createdBy(), "UNPAID", null, null, null, null, null, null, null, null, order.unit(),
+                order.paymentMethodPreference(), order.paymentTiming(), order.billingType(), order.actualWeightKg());
     }
     private static boolean matchesStoredPayment(DocumentSnapshot order, String orderId, PayMongoGateway.VerifiedPayment payment) {
         if (payment == null || !"PENDING".equals(paymentStatus(order))) return false;
@@ -736,12 +1086,22 @@ public class ShopOrderService {
     private static boolean isPaid(DocumentSnapshot order) { return "PAID".equals(order.getString("paymentStatus")); }
     private static boolean isPaymentLocked(DocumentSnapshot order) { return "PAID".equals(paymentStatus(order)) || "PENDING".equals(paymentStatus(order)); }
     private static BigDecimal orderQuantity(DocumentSnapshot order) {
-        Object quantity = order.get("quantity");
-        return decimal(quantity == null ? order.get("kilos") : quantity);
+        Object quantityField = order.get("quantity");
+        Object kilosField = order.get("kilos");
+        Object raw = quantityField != null ? quantityField : kilosField;
+        return raw == null ? null : nullableDecimal(raw);
     }
     private static String orderUnit(DocumentSnapshot order) {
-        String unit = order.getString("unit");
-        return unit == null || unit.isBlank() ? "kg" : unit;
+        String unit = first(order.getString("quantityUnit"), order.getString("unit"));
+        return unit.isBlank() ? "kg" : unit;
+    }
+    private static String orderBillingType(DocumentSnapshot order) {
+        Map<?, ?> service = order.get("service") instanceof Map<?, ?> values ? values : Map.of();
+        String configured = string(service.get("billingType"));
+        if (configured != null && !configured.isBlank()) return OrderPricing.billingType(configured, null);
+        String unit = first(order.getString("quantityUnit"), order.getString("unit"));
+        if (!unit.isBlank()) return OrderPricing.billingType(null, unit);
+        return order.get("kilos") != null || order.get("quantity") != null ? "PER_KG" : null;
     }
     private static String serviceUnit(DocumentSnapshot service) {
         String unit = service.getString("unit");
@@ -760,6 +1120,52 @@ public class ShopOrderService {
         String status = order.getString("paymentStatus");
         return "PAID".equals(status) || "PENDING".equals(status) ? status : "UNPAID";
     }
+    private static String paymentMethodPreference(DocumentSnapshot order) {
+        String preference = order.getString("paymentMethodPreference");
+        return "ONLINE".equals(preference) || "CASH".equals(preference) ? preference : null;
+    }
+    private static String paymentTiming(DocumentSnapshot order) {
+        String timing = order.getString("paymentTiming");
+        return timing == null || timing.isBlank() || "PAY_NOW".equals(timing) ? "PAY_NOW" : "PAY_AT_CLAIM";
+    }
+    private static void requirePaymentTiming(DocumentSnapshot order) {
+        LaundryStage stage = parseStage(order.getString("stage"));
+        if (stage == null || stage == LaundryStage.CLAIMED)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Payment cannot be recorded at this order stage.");
+        if ("PAY_AT_CLAIM".equals(paymentTiming(order)) && stage != LaundryStage.READY)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is set to be paid at claim. Record payment when it is Ready for pickup.");
+    }
+    private static String validatePaymentMethodPreference(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (!List.of("CASH", "ONLINE").contains(normalized))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment method must be CASH or ONLINE.");
+        return normalized;
+    }
+    private static String validatePaymentTiming(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (!List.of("PAY_NOW", "PAY_AT_CLAIM").contains(normalized))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment timing must be PAY_NOW or PAY_AT_CLAIM.");
+        return normalized;
+    }
+    private static String validateClientRequestId(String value) {
+        if (value == null || !value.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A valid client request UUID is required.");
+        return UUID.fromString(value).toString();
+    }
+    private static String orderRequestFingerprint(String... fields) {
+        StringBuilder canonical = new StringBuilder();
+        for (String field : fields) {
+            String value = field == null ? "" : field;
+            canonical.append(value.length()).append(':').append(value).append('|');
+        }
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(canonical.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable.", exception);
+        }
+    }
     private static BigDecimal validateKilos(BigDecimal value) {
         if (value == null || value.compareTo(BigDecimal.ZERO) <= 0 || value.compareTo(MAX_KILOS) > 0 || value.scale() > 2)
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Kilos must be greater than 0 and no more than 999.99, with at most 2 decimal places.");
@@ -771,11 +1177,19 @@ public class ShopOrderService {
         return value.setScale(2, RoundingMode.UNNECESSARY);
     }
     private static BigDecimal decimal(Object value) {
+        BigDecimal parsed = nullableDecimal(value);
+        return parsed == null ? BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP) : parsed;
+    }
+    private static BigDecimal nullableDecimal(Object value) {
+        if (value == null) return null;
         if (value instanceof BigDecimal decimal) return decimal.setScale(2, RoundingMode.HALF_UP);
         if (value instanceof Number number) return BigDecimal.valueOf(number.doubleValue()).setScale(2, RoundingMode.HALF_UP);
-        return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+        if (value instanceof String text && !text.isBlank()) {
+            try { return new BigDecimal(text.trim()).setScale(2, RoundingMode.HALF_UP); }
+            catch (NumberFormatException ignored) { return null; }
+        }
+        return null;
     }
-    private static BigDecimal nullableDecimal(Object value) { return value == null ? null : decimal(value); }
     private static Instant instant(Object value) {
         java.time.LocalDateTime dateTime = FirestoreSupport.dateTime(value);
         return dateTime == null ? null : dateTime.toInstant(java.time.ZoneOffset.UTC);

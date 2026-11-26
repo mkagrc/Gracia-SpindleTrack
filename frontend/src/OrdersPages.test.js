@@ -12,7 +12,7 @@ const vite = await createServer({
   logLevel: 'silent',
   server: { middlewareMode: true, fs: { strict: false } },
 });
-const { LAUNDRY_STAGES, nextLaundryStage, paymentStatusLabel, suggestTotalPrice, createOrderPayload, customerOrderSnapshot, stageProgressPercent, quantityInputLabel, orderQuantityDisplay } = await vite.ssrLoadModule('/src/OrdersPages.jsx');
+const { LAUNDRY_STAGES, nextLaundryStage, paymentStatusLabel, suggestTotalPrice, createOrderPayload, customerOrderSnapshot, stageProgressPercent, quantityInputLabel, orderQuantityDisplay, createClientRequestId } = await vite.ssrLoadModule('/src/OrdersPages.jsx');
 after(async () => vite.close());
 
 test('frontend follows the six existing laundry stages in the defined order', () => {
@@ -37,21 +37,28 @@ test('payment status labels distinguish unpaid, pending online, and paid', () =>
   assert.equal(paymentStatusLabel('PAID'), 'Paid');
 });
 
-test('new-order payload includes only the explicitly attached trimmed email and keeps staff-entered price', () => {
+test('new-order payload omits client-controlled price and unit while including only an explicitly attached email', () => {
   const fields = { customerName: 'Customer', mobile: '639171234567', serviceId: 'svc-1', kilos: 2.5, totalPrice: 72, notes: '' };
-  const payload = { customerName: 'Customer', mobile: '639171234567', serviceId: 'svc-1', quantity: 2.5, totalPrice: 72, notes: '' };
+  const payload = { customerName: 'Customer', mobile: '639171234567', serviceId: 'svc-1', quantity: 2.5, notes: '' };
   assert.deepEqual(createOrderPayload(fields, ' Customer@Example.com '), { ...payload, customerEmail: 'Customer@Example.com' });
   assert.deepEqual(createOrderPayload(fields), payload);
   assert.equal(createOrderPayload(fields, ' ').customerEmail, undefined);
-  assert.equal(createOrderPayload(fields, ' Customer@Example.com ').totalPrice, 72);
+  assert.equal(createOrderPayload({ ...fields, unit: 'load', pricePerUnit: 25 }, ' Customer@Example.com ').unit, undefined);
+  assert.equal(createOrderPayload(fields).totalPrice, undefined);
 });
 
-test('order quantity label and display follow kg, piece, and load service units', () => {
-  assert.equal(quantityInputLabel('kg'), 'Kilos');
-  assert.equal(quantityInputLabel('piece'), 'Pieces');
-  assert.equal(quantityInputLabel('load'), 'Loads');
-  assert.equal(orderQuantityDisplay({ quantity: 2, unit: 'piece' }), '2.00 piece');
-  assert.equal(orderQuantityDisplay({ kilos: 1.5 }), '1.50 kg');
+test('order quantity label and display follow kg, piece, load, and flat billing types', () => {
+  assert.equal(quantityInputLabel('kg'), 'Weight (kg)');
+  assert.equal(quantityInputLabel('piece'), 'Number of pieces');
+  assert.equal(quantityInputLabel('load'), 'Number of loads');
+  assert.equal(quantityInputLabel({ billingType: 'FLAT' }), 'Flat rate');
+  assert.equal(orderQuantityDisplay({ quantity: 2, unit: 'piece' }), 'Pieces: 2 pieces');
+  assert.equal(orderQuantityDisplay({ quantity: 2, quantityUnit: 'load' }), 'Loads: 2 loads');
+  assert.equal(orderQuantityDisplay({ kilos: 1.5 }), 'Weight: 1.50 kg');
+  assert.equal(orderQuantityDisplay({ quantity: 1, billingType: 'FLAT' }), 'Flat rate');
+  assert.equal(orderQuantityDisplay({ kilos: null, quantity: null }), 'N/A');
+  assert.equal(orderQuantityDisplay({}), 'N/A');
+  assert.equal(orderQuantityDisplay({ kilos: 3.5, unit: 'kg' }), 'Weight: 3.50 kg');
 });
 
 test('customer dashboard summary uses the server total and labels stage counts as page-scoped', () => {
@@ -79,4 +86,9 @@ test('customer order progress percentage follows the six-stage workflow and hand
   assert.equal(stageProgressPercent('READY'), 80);
   assert.equal(stageProgressPercent('CLAIMED'), 100);
   assert.equal(stageProgressPercent('UNKNOWN'), 0);
+});
+
+test('order creation UUID uses a secure random UUID provider', () => {
+  const expected = '9a9f1d90-74db-4a8f-9bc3-1091b12c5c99';
+  assert.equal(createClientRequestId({ randomUUID: () => expected }), expected);
 });

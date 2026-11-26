@@ -17,6 +17,6 @@ public class AuthController {
     @PostMapping("/session")
     public AuthSessionResponse createSession(@AuthenticationPrincipal FirebasePrincipal principal) {
         return authService.createOrLoadSession(
-                new FirebaseIdentity(principal.uid(), principal.email(), principal.displayName()));
+                new FirebaseIdentity(principal.uid(), principal.email(), principal.displayName(), principal.emailVerified()));
     }
 }

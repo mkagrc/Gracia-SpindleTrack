@@ -28,3 +28,28 @@ button,
 a {
   -webkit-tap-highlight-color: transparent;
 }
+
+@media print {
+  @page { size: auto; margin: 12mm; }
+  body * { visibility: hidden !important; }
+  .invoice-print-root,
+  .invoice-print-root * { visibility: visible !important; }
+  .invoice-print-root {
+    position: absolute !important;
+    inset: 0 auto auto 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+    color: #000 !important;
+    background: #fff !important;
+  }
+  .invoice-print-root .invoice-print-hide { display: none !important; }
+  .invoice-print-root table { width: 100% !important; min-width: 0 !important; }
+  .invoice-print-root tr,
+  .invoice-print-root td,
+  .invoice-print-root th { break-inside: avoid; }
+}

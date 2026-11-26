@@ -44,16 +44,17 @@ class ShopOrderControllerTest {
                 "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
                 "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "UNPAID", null, null, null, null);
         when(orders.create(any(), any())).thenReturn(summary);
-        when(orders.advance(any(), eq("order-id-a7"))).thenReturn(summary);
+        when(orders.advance(any(), eq("order-id-a7"), any())).thenReturn(summary);
         when(orders.list(any(), eq(null), eq(null), eq(0))).thenReturn(new ShopOrderService.OrdersPage(List.of(summary), 0, 20, 1, 1));
         when(orders.get(any(), eq("order-id-a7"))).thenReturn(new ShopOrderService.OrderDetail(summary, List.of(), List.of()));
         when(orders.changePrice(any(), eq("order-id-a7"), any())).thenReturn(summary);
 
         mvc.perform(post("/api/shops/orders").with(authentication(auth("STAFF")))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"customerName\":\"A Person\",\"mobile\":\"+63 917 123 4567\",\"serviceId\":\"svc-string-1\",\"kilos\":2,\"totalPrice\":30.00,\"notes\":\"\"}"))
+                .content("{\"customerName\":\"A Person\",\"mobile\":\"+63 917 123 4567\",\"serviceId\":\"svc-string-1\",\"kilos\":2,\"totalPrice\":30.00,\"notes\":\"\",\"paymentMethodPreference\":\"CASH\",\"paymentTiming\":\"PAY_NOW\",\"clientRequestId\":\"00000000-0000-4000-8000-000000000003\"}"))
                 .andExpect(status().isOk());
-        mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("STAFF"))))
+        mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("STAFF")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"expectedStage\":\"RECEIVED\",\"clientRequestId\":\"00000000-0000-4000-8000-000000000001\"}"))
                 .andExpect(status().isOk());
         mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth("STAFF")))
                 .contentType(MediaType.APPLICATION_JSON).content("{\"totalPrice\":35.00}"))
@@ -71,11 +72,12 @@ class ShopOrderControllerTest {
         mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth("OWNER")))
                 .contentType(MediaType.APPLICATION_JSON).content("{\"totalPrice\":35.00}"))
                 .andExpect(status().isForbidden());
-        mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("OWNER"))))
+        mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth("OWNER")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"expectedStage\":\"RECEIVED\",\"clientRequestId\":\"00000000-0000-4000-8000-000000000001\"}"))
                 .andExpect(status().isForbidden());
 
         verify(orders).create(any(), any());
-        verify(orders).advance(any(), eq("order-id-a7"));
+        verify(orders).advance(any(), eq("order-id-a7"), any());
         verify(orders, times(2)).list(any(), eq(null), eq(null), eq(0));
         verify(orders).get(any(), eq("order-id-a7"));
         verify(orders).changePrice(any(), eq("order-id-a7"), any());
@@ -91,7 +93,9 @@ class ShopOrderControllerTest {
                     .andExpect(status().isForbidden());
             mvc.perform(patch("/api/shops/orders/order-id-a7/price").with(authentication(auth(role))).contentType(MediaType.APPLICATION_JSON)
                     .content("{\"totalPrice\":35.00}")).andExpect(status().isForbidden());
-            mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth(role)))).andExpect(status().isForbidden());
+            mvc.perform(post("/api/shops/orders/order-id-a7/advance").with(authentication(auth(role)))
+                    .contentType(MediaType.APPLICATION_JSON).content("{\"expectedStage\":\"RECEIVED\",\"clientRequestId\":\"00000000-0000-4000-8000-000000000001\"}"))
+                    .andExpect(status().isForbidden());
         }
     }
 
@@ -153,17 +157,19 @@ class ShopOrderControllerTest {
         ShopOrderService.OrderSummary summary = new ShopOrderService.OrderSummary("order-id-a7", "shop-string-A", "O-000001",
                 "A Person", "639171234567", null, "svc-id", "Wash", new BigDecimal("2.00"), new BigDecimal("30.00"),
                 "", LaundryStage.RECEIVED, Instant.now(), "staff-user", "PENDING", "ONLINE", null, null, null);
-        when(orders.createPaymentLink(any(), eq("order-id-a7"))).thenReturn(new ShopOrderService.PaymentLinkResult(summary, "link-1", "https://pm.link/test"));
+        when(orders.createPaymentLink(any(), eq("order-id-a7"), any())).thenReturn(new ShopOrderService.PaymentLinkResult(summary, "link-1", "https://pm.link/test"));
         when(orders.confirmOnlinePayment(any(), eq("order-id-a7"))).thenReturn(summary);
         when(orders.cancelPaymentLink(any(), eq("order-id-a7"))).thenReturn(summary);
-        mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth("STAFF"))))
+        mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth("STAFF")))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"clientRequestId\":\"00000000-0000-4000-8000-000000000002\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.paymentLinkUrl").value("https://pm.link/test"));
         mvc.perform(post("/api/shops/orders/order-id-a7/payments/confirm-online").with(authentication(auth("STAFF"))))
                 .andExpect(status().isOk());
         mvc.perform(post("/api/shops/orders/order-id-a7/payments/cancel-link").with(authentication(auth("STAFF"))))
                 .andExpect(status().isOk());
         for (String role : List.of("OWNER", "PLATFORM_ADMIN", "CUSTOMER")) {
-            mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth(role))))
+            mvc.perform(post("/api/shops/orders/order-id-a7/payments/paymongo-link").with(authentication(auth(role)))
+                    .contentType(MediaType.APPLICATION_JSON).content("{\"clientRequestId\":\"00000000-0000-4000-8000-000000000002\"}"))
                     .andExpect(status().isForbidden());
             mvc.perform(post("/api/shops/orders/order-id-a7/payments/confirm-online").with(authentication(auth(role))))
                     .andExpect(status().isForbidden());

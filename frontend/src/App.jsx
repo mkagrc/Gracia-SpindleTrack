@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Activity, ArrowDown, ArrowLeft, ArrowRight, BadgeCheck, Check, ChevronDown, ChevronLeft,
@@ -6,18 +6,25 @@ import {
   LayoutDashboard, LoaderCircle, LogOut, Menu, Search, ShieldCheck, Store, Upload,
   UserRound, Users, AlertTriangle, Clock3, MapPin, Phone, Mail, Building2, Plus,
 } from 'lucide-react';
-import { createUserWithEmailAndPassword, reload as reloadFirebaseUser, sendEmailVerification, signOut as firebaseSignOut } from 'firebase/auth';
-import { auth } from './firebase.js';
 import api, { apiErrorMessage } from './api.js';
 import { useAuth } from './AuthContext.jsx';
+import {
+  RESEND_COOLDOWN_SECONDS,
+  VERIFICATION_SENT_MESSAGE,
+  VERIFY_BEFORE_SIGNIN_MESSAGE,
+  cooldownRemainingSeconds,
+} from './emailVerificationAuth.js';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
-import { AcceptInvitationPage, CustomerInvitationsPage, OwnerServicesPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
-import { CustomerOrderDetailPage, CustomerOrdersPage, NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import { AcceptInvitationPage, CustomerInvitationsPage, OwnerStaffPage, StaffServicesPanel } from './Step5BPages.jsx';
+import { CustomerOrdersPage, NewOrderPage, OrderDetailPage, OrdersListPage } from './OrdersPages.jsx';
+import CustomerOrderDetailPage from './CustomerOrderDetailPage.jsx';
+import { OwnerAddOnsPage, OwnerServicesPage } from './OwnerCatalogPages.jsx';
 import { OwnerDashboardMetrics, OwnerReportsPage, OwnerUnclaimedPage } from './OwnerOperationsPages.jsx';
 import PublicOrderLookupPage from './PublicOrderLookupPage.jsx';
 import PublicShopsPage from './PublicShopsPage.jsx';
-import { getInvitationReturn, postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
+import { postAuthDestination, rememberInvitationReturn, takeInvitationReturn } from './invitationReturn.js';
+import { CEBU_MUNICIPALITIES, DEFAULT_PROVINCE } from './cebuMunicipalities.js';
 
 const ShopLocationPickerLazy = lazy(() => import('./ShopLocationPicker.jsx'));
 function LocationPickerWrapper(props) {
@@ -30,6 +37,9 @@ function LocationPickerWrapper(props) {
 import { customerMenuForInvitations, dismissInvitationPrompt, undismissedInvitations } from './invitationInbox.js';
 import { formatAdminOrderCount } from './adminOrderCounts.js';
 import { roleMayAccess } from './roleAccess.js';
+import { normalizePagedRows } from './orderPageData.js';
+import { publicLayoutMode } from './routeLayout.js';
+import { formatDate, formatDateTime } from './formatters.js';
 
 const ROLE_HOME = { PLATFORM_ADMIN: '/admin/shops', OWNER: '/owner', STAFF: '/staff', CUSTOMER: '/customer/orders' };
 const ROLE_LABEL = { PLATFORM_ADMIN: 'Platform Admin', OWNER: 'Owner', STAFF: 'Staff', CUSTOMER: 'Customer' };
@@ -39,16 +49,8 @@ const ACCEPTED_EXT = /\.(jpe?g|png|pdf)$/i;
 
 function homeFor(session) { return ROLE_HOME[session?.role] || '/'; }
 function humanRole(role) { return ROLE_LABEL[role] || role?.replaceAll('_', ' ') || 'Account'; }
-function dateLabel(value) {
-  if (!value) return '—';
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
-function lastSeenLabel(value) {
-  if (value === null || value === undefined || value === '') return 'No presence recorded';
-  const parsed = new Date(Number(value));
-  return Number.isNaN(parsed.getTime()) ? 'No presence recorded' : parsed.toLocaleString();
-}
+function dateLabel(value) { return formatDate(value); }
+function lastSeenLabel(value) { if (value === null || value === undefined || value === '') return 'No presence recorded'; const formatted = formatDateTime(Number(value)); return formatted === '—' ? 'No presence recorded' : formatted; }
 function orderCountLabel(value) { return formatAdminOrderCount(value); }
 function prettyStatus(value) { return (value || 'UNKNOWN').replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 
@@ -75,6 +77,33 @@ function TextField({ label, value, onChange, ...props }) {
 function TextAreaField({ label, value, onChange, ...props }) {
   return <label className="block text-sm font-medium text-slate-700">{label}<textarea value={value} onChange={onChange} {...props} className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-brand focus:ring-4 focus:ring-teal-50" /></label>;
 }
+function MunicipalityFields({ municipality, province, onMunicipalityChange, onProvinceChange }) {
+  const options = municipality && !CEBU_MUNICIPALITIES.includes(municipality)
+    ? [municipality, ...CEBU_MUNICIPALITIES]
+    : CEBU_MUNICIPALITIES;
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <label className="block text-sm font-medium text-slate-700">
+        Municipality / City
+        <select
+          value={municipality}
+          onChange={onMunicipalityChange}
+          className="mt-1.5 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3.5 text-sm outline-none transition focus:border-brand focus:ring-4 focus:ring-teal-50"
+        >
+          <option value="">Select municipality…</option>
+          {options.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </label>
+      <TextField
+        label="Province"
+        maxLength={160}
+        placeholder="e.g. Cebu"
+        value={province}
+        onChange={onProvinceChange}
+      />
+    </div>
+  );
+}
 
 const MENU = {
   CUSTOMER: [
@@ -88,6 +117,7 @@ const MENU = {
     { label: 'Registration status', to: '/shop-registration', icon: FileCheck2 },
     { label: 'Orders', to: '/owner/orders', icon: ClipboardList },
     { label: 'Services', to: '/owner/services', icon: Activity },
+    { label: 'Add-ons', to: '/owner/add-ons', icon: Plus },
     { label: 'Staff', to: '/owner/staff', icon: Users },
     { label: 'Unclaimed', to: '/owner/unclaimed', icon: CircleHelp },
     { label: 'Reports', to: '/owner/reports', icon: FileCheck2 },
@@ -175,7 +205,7 @@ function AppShell({ children }) {
     } finally { setInviteBusy(false); }
   };
   const shopLabel = session?.shop?.name || (role === 'PLATFORM_ADMIN' ? 'Platform workspace' : 'Shop workspace');
-  return <div className="min-h-screen bg-canvas text-ink">
+  return <div className="flex min-h-[100dvh] bg-canvas text-ink">
     <Toast type={inviteToast?.type} message={inviteToast?.message} onDismiss={() => setInviteToast(null)} />
     {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-30 bg-slate-950/40 lg:hidden" onClick={() => setMobileOpen(false)} />}
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[268px] flex-col border-r border-slate-200 bg-white px-4 py-5 transition-transform lg:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
@@ -186,10 +216,10 @@ function AppShell({ children }) {
       <div className="mt-auto rounded-2xl border border-teal-100 bg-teal-50/70 p-3 text-xs leading-5 text-teal-900"><div className="flex items-center gap-2 font-semibold"><ShieldCheck size={16} />Private by design</div><p className="mt-1 text-teal-800/80">Your access is limited to the role and shop assigned to your account.</p></div>
       <button type="button" onClick={leave} className="mt-3 flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold text-slate-600 transition hover:bg-red-50 hover:text-red-700"><LogOut size={18} />Sign out</button>
     </aside>
-    <div className="min-h-screen lg:pl-[268px]">
+    <div className="flex min-h-[100dvh] flex-1 flex-col lg:pl-[268px]">
       <header className="sticky top-0 z-20 flex min-h-[68px] items-center justify-between border-b border-slate-200 bg-white/95 px-4 backdrop-blur sm:px-7"><div className="flex items-center gap-3"><button type="button" aria-label="Open navigation" className="grid h-10 w-10 place-items-center rounded-xl text-slate-600 hover:bg-slate-100 lg:hidden" onClick={() => setMobileOpen(true)}><Menu size={21} /></button><div><p className="text-xs text-slate-400">{humanRole(role)} workspace</p><p className="max-w-[55vw] truncate text-sm font-semibold text-ink">{shopLabel}</p></div></div><div className="flex items-center gap-2"><span className="hidden rounded-full bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-800 sm:inline-flex">{humanRole(role)}</span><button type="button" onClick={leave} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 hover:bg-slate-100 lg:hidden" aria-label="Sign out"><LogOut size={18} /></button></div></header>
-      <main className="mx-auto w-full max-w-[1440px] px-4 py-7 sm:px-7 sm:py-9">{children}</main>
-      <footer className="border-t border-slate-200 bg-white px-5 py-4 text-xs text-slate-400 sm:px-7">SpindleTrack · Multi-shop laundry workspace</footer>
+      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-7 sm:px-7 sm:py-9">{children}</main>
+      <footer className="mt-auto border-t border-slate-200 bg-white px-5 py-4 text-xs text-slate-400 sm:px-7">SpindleTrack - Multi-shop laundry workspace</footer>
     </div>
     {currentPrompt && <div role="dialog" aria-modal="true" aria-labelledby="invitation-prompt-title" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4"><section className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">Staff invitation</p><h2 id="invitation-prompt-title" className="mt-2 text-xl font-semibold text-ink">{currentPrompt.shopName} invited you to join as staff</h2><p className="mt-2 text-sm leading-6 text-slate-600">Accept to join this shop, or decline to remove this invitation from your pending inbox.</p><div className="mt-5 flex flex-wrap gap-2"><button type="button" disabled={inviteBusy} onClick={() => acceptPrompt(currentPrompt)} className="min-h-10 rounded-xl bg-brand px-4 text-sm font-semibold text-white disabled:opacity-50">{inviteBusy ? 'Please wait…' : 'Accept'}</button><button type="button" disabled={inviteBusy} onClick={() => setConfirmDecline(currentPrompt)} className="min-h-10 rounded-xl border border-rose-200 px-4 text-sm font-semibold text-rose-700 disabled:opacity-50">Decline</button><button type="button" disabled={inviteBusy} onClick={() => dismissPrompt(currentPrompt)} className="min-h-10 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-600 disabled:opacity-50">Not now</button></div></section></div>}
     {confirmDecline && <ConfirmDialog title="Decline shop invitation?" message={`Decline the invitation to “${confirmDecline.shopName}”? It will be removed from your pending inbox.`} confirmLabel="Decline invitation" cancelLabel="Cancel" tone="danger" loading={inviteBusy} onConfirm={declinePrompt} onCancel={() => setConfirmDecline(null)} formatError={apiErrorMessage} />}
@@ -197,7 +227,7 @@ function AppShell({ children }) {
 }
 
 function PublicFrame({ children }) {
-  return <div className="flex min-h-screen flex-col bg-canvas"><header className="border-b border-slate-200 bg-white"><div className="mx-auto flex min-h-[68px] max-w-7xl items-center justify-between gap-4 px-5 sm:px-8"><Brand /><Link to="/sign-in" className="inline-flex min-h-10 items-center rounded-xl px-4 text-sm font-semibold text-slate-700 hover:bg-slate-100">Sign in</Link></div></header>{children}<footer className="border-t border-slate-200 bg-white px-5 py-5 text-center text-xs text-slate-400">SpindleTrack · Laundry operations, made simpler</footer></div>;
+  return <div className="flex min-h-[100dvh] flex-col bg-canvas"><header className="border-b border-slate-200 bg-white"><div className="mx-auto flex min-h-[68px] max-w-7xl items-center justify-between gap-4 px-5 sm:px-8"><Brand /><Link to="/sign-in" className="inline-flex min-h-10 items-center rounded-xl px-4 text-sm font-semibold text-slate-700 hover:bg-slate-100">Sign in</Link></div></header><div className="flex flex-1 flex-col">{children}</div><footer className="mt-auto border-t border-slate-200 bg-white px-5 py-5 text-center text-xs text-slate-400">SpindleTrack - Multi-shop laundry workspace</footer></div>;
 }
 function HomePage() {
   const { session } = useAuth();
@@ -206,13 +236,23 @@ function HomePage() {
 }
 function SignInPage() {
   const navigate = useNavigate(); const location = useLocation();
-  const { signInGoogle, signInEmail, syncSession, sessionError, clearSessionError } = useAuth();
+  const { signInGoogle, signInEmail, createEmailAccount, resendEmailVerification, sessionError, clearSessionError } = useAuth();
   const [mode, setMode] = useState(new URLSearchParams(location.search).get('mode') === 'create' ? 'create' : 'signin'); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
-  const [verifyBusy, setVerifyBusy] = useState(false);
-  const fromState = location.state?.from;
-  const inviteReturn = getInvitationReturn() || (fromState?.pathname === '/accept-invitation' ? `${fromState.pathname}${fromState.search || ''}${fromState.hash || ''}` : '');
-  const verificationSettings = inviteReturn ? { url: new URL(inviteReturn, window.location.origin).toString() } : undefined;
+  const [needsVerification, setNeedsVerification] = useState(false); const [verifyBusy, setVerifyBusy] = useState(false);
+  const [cooldownUntilMs, setCooldownUntilMs] = useState(0);
+  const [cooldownLeft, setCooldownLeft] = useState(0);
+  useEffect(() => {
+    const remaining = cooldownRemainingSeconds(cooldownUntilMs);
+    setCooldownLeft(remaining);
+    if (remaining <= 0) return undefined;
+    const timer = setInterval(() => {
+      const next = cooldownRemainingSeconds(cooldownUntilMs);
+      setCooldownLeft(next);
+      if (next <= 0) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldownUntilMs]);
   const go = (session) => {
     const target = location.state?.from;
     const fallback = target ? `${target.pathname || '/'}${target.search || ''}${target.hash || ''}` : '';
@@ -220,24 +260,26 @@ function SignInPage() {
     navigate(returnPath, { replace: true });
   };
   const resendVerification = async () => {
-    const user = auth.currentUser;
-    if (!user) { setError('Sign in with the account you are verifying before requesting another verification email.'); return; }
-    setVerifyBusy(true); setError('');
-    try { await sendEmailVerification(user, verificationSettings); setNotice(`Verification email sent to ${user.email || 'your email address'}.`); }
-    catch (reason) { setError(apiErrorMessage(reason, 'The verification email could not be resent.')); }
-    finally { setVerifyBusy(false); }
-  };
-  const checkVerification = async () => {
-    const user = auth.currentUser;
-    if (!user) { setError('Sign in again after verifying your email.'); return; }
-    setVerifyBusy(true); setError('');
+    if (cooldownLeft > 0 || verifyBusy) return;
+    if (!email.trim() || !password) {
+      setError('Enter your email and password below, then click Resend verification email.');
+      return;
+    }
+    setVerifyBusy(true); setError(''); setNotice(''); clearSessionError();
     try {
-      await reloadFirebaseUser(user);
-      if (!user.emailVerified) { setError('Your email is still waiting for verification. Open the verification link, then try again.'); return; }
-      await user.getIdToken(true);
-      go(await syncSession(user));
-    } catch (reason) { setError(apiErrorMessage(reason, 'Your verified session could not be refreshed.')); }
-    finally { setVerifyBusy(false); }
+      const result = await resendEmailVerification(email.trim(), password);
+      if (result?.alreadyVerified) {
+        setNeedsVerification(false);
+        setNotice('Your email is already verified. Click Sign in to continue.');
+      } else {
+        setCooldownUntilMs(Date.now() + RESEND_COOLDOWN_SECONDS * 1000);
+        setNotice(VERIFICATION_SENT_MESSAGE);
+      }
+    } catch (reason) {
+      setError(friendly(reason));
+    } finally {
+      setVerifyBusy(false);
+    }
   };
   const friendly = (reason) => {
     const code = reason?.code || '';
@@ -245,24 +287,34 @@ function SignInPage() {
     if (['invalid-credential', 'wrong-password', 'user-not-found'].some((item) => code.includes(item))) return 'Email or password was not recognized.';
     if (code.includes('email-already-in-use')) return 'An account already uses this email. Sign in instead.';
     if (code.includes('weak-password')) return 'Use a password with at least 6 characters.';
+    if (code.includes('too-many-requests')) return 'Too many requests. Please wait a moment before trying again.';
     return apiErrorMessage(reason, reason?.message || 'Sign-in could not be completed. Please try again.');
   };
-  const doGoogle = async () => { setBusy(true); setError(''); clearSessionError(); try { go(await signInGoogle()); } catch (e) { setError(friendly(e)); } finally { setBusy(false); } };
+  const doGoogle = async () => { setBusy(true); setError(''); setNeedsVerification(false); clearSessionError(); try { go(await signInGoogle()); } catch (e) { setError(friendly(e)); } finally { setBusy(false); } };
   const doSubmit = async (event) => {
     event.preventDefault(); setBusy(true); setError(''); setNotice(''); clearSessionError();
     try {
       if (mode === 'create') {
         if (password !== confirm) throw new Error('Passwords do not match.');
-        const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        await sendEmailVerification(credential.user, verificationSettings);
-        if (!inviteReturn) await firebaseSignOut(auth);
+        await createEmailAccount(email.trim(), password);
+        setNeedsVerification(false);
         setMode('signin'); setPassword(''); setConfirm('');
-        setNotice(`Waiting for email verification. A verification email was sent to ${email.trim()}.`);
-      } else go(await signInEmail(email.trim(), password));
-    } catch (e) { setError(friendly(e)); } finally { setBusy(false); }
+        setNotice(VERIFICATION_SENT_MESSAGE);
+      } else {
+        setNeedsVerification(false);
+        go(await signInEmail(email.trim(), password));
+      }
+    } catch (e) {
+      if (e?.code === 'auth/email-not-verified' || e?.message === VERIFY_BEFORE_SIGNIN_MESSAGE) {
+        setNeedsVerification(true);
+        setError(VERIFY_BEFORE_SIGNIN_MESSAGE);
+      } else {
+        setNeedsVerification(false);
+        setError(friendly(e));
+      }
+    } finally { setBusy(false); }
   };
-  const waitingForInviteVerification = Boolean(inviteReturn && auth.currentUser && !auth.currentUser.emailVerified);
-  return <PublicFrame><main className="mx-auto flex w-full max-w-xl flex-1 items-center px-5 py-10"><section className="w-full rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-10"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-teal-50 text-brand"><Droplets size={28} /></div><h1 className="mt-5 text-center text-2xl font-semibold text-ink">{waitingForInviteVerification ? 'Waiting for email verification' : mode === 'create' ? 'Create your account' : 'Welcome back'}</h1><p className="mt-2 text-center text-sm leading-6 text-slate-500">Sign in to your secure shop workspace. Email/password accounts must verify their email.</p><ErrorBanner error={error || sessionError} />{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}{waitingForInviteVerification && <div className="mt-4 flex flex-wrap justify-center gap-2"><button type="button" disabled={verifyBusy} onClick={resendVerification} className="min-h-10 rounded-xl border border-slate-200 px-3 text-sm font-semibold">{verifyBusy ? 'Please wait…' : 'Resend verification email'}</button><button type="button" disabled={verifyBusy} onClick={checkVerification} className="min-h-10 rounded-xl bg-brand px-3 text-sm font-semibold text-white">I’ve verified my email</button></div>}<button type="button" onClick={doGoogle} disabled={busy} className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{busy ? <LoaderCircle size={18} className="animate-spin" /> : <span className="font-bold text-blue-600">G</span>}Continue with Google</button><div className="my-6 flex items-center gap-3 text-[10px] uppercase tracking-widest text-slate-400"><span className="h-px flex-1 bg-slate-200" />or email and password<span className="h-px flex-1 bg-slate-200" /></div><form className="space-y-4" onSubmit={doSubmit}><TextField label="Email address" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} /><TextField label="Password" type="password" required minLength={6} autoComplete={mode === 'create' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} />{mode === 'create' && <TextField label="Confirm password" type="password" required minLength={6} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />}<button disabled={busy} className="min-h-12 w-full rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Please wait…' : mode === 'create' ? 'Create account and verify email' : 'Sign in'}</button></form><p className="mt-5 text-center text-sm text-slate-600">{mode === 'create' ? 'Already have an account?' : 'New to SpindleTrack?'} <button type="button" onClick={() => { setMode(mode === 'create' ? 'signin' : 'create'); setError(''); setNotice(''); }} className="font-semibold text-brand">{mode === 'create' ? 'Sign in' : 'Create an account'}</button></p><p className="mt-3 text-center text-xs leading-5 text-slate-400">New accounts start as customers. A verified email is required to continue.</p></section></main></PublicFrame>;
+  return <PublicFrame><main className="mx-auto flex w-full max-w-xl flex-1 items-center px-5 py-10"><section className="w-full rounded-3xl border border-slate-100 bg-white p-7 shadow-soft sm:p-10"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-teal-50 text-brand"><Droplets size={28} /></div><h1 className="mt-5 text-center text-2xl font-semibold text-ink">{mode === 'create' ? 'Create your account' : 'Welcome back'}</h1><p className="mt-2 text-center text-sm leading-6 text-slate-500">Sign in to your secure shop workspace. Email/password accounts must verify their email.</p><ErrorBanner error={error || sessionError} />{needsVerification && mode === 'signin' && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5"><span className="text-xs text-amber-900">Need another verification link?</span><button type="button" disabled={verifyBusy || busy || cooldownLeft > 0} onClick={resendVerification} className="min-h-9 rounded-lg border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50">{verifyBusy ? 'Sending\u2026' : cooldownLeft > 0 ? `Resend verification email (${cooldownLeft}s)` : 'Resend verification email'}</button></div>}{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}<button type="button" onClick={doGoogle} disabled={busy} className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{busy ? <LoaderCircle size={18} className="animate-spin" /> : <span className="font-bold text-blue-600">G</span>}Continue with Google</button><div className="my-6 flex items-center gap-3 text-[10px] uppercase tracking-widest text-slate-400"><span className="h-px flex-1 bg-slate-200" />or email and password<span className="h-px flex-1 bg-slate-200" /></div><form className="space-y-4" onSubmit={doSubmit}><TextField label="Email address" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} /><TextField label="Password" type="password" required minLength={6} autoComplete={mode === 'create' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} />{mode === 'create' && <TextField label="Confirm password" type="password" required minLength={6} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />}<button disabled={busy} className="min-h-12 w-full rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Please wait\u2026' : mode === 'create' ? 'Create account and verify email' : 'Sign in'}</button></form><p className="mt-5 text-center text-sm text-slate-600">{mode === 'create' ? 'Already have an account?' : 'New to SpindleTrack?'} <button type="button" onClick={() => { setMode(mode === 'create' ? 'signin' : 'create'); setError(''); setNotice(''); setNeedsVerification(false); }} className="font-semibold text-brand">{mode === 'create' ? 'Sign in' : 'Create an account'}</button></p><p className="mt-3 text-center text-xs leading-5 text-slate-400">New accounts start as customers. A verified email is required to continue.</p></section></main></PublicFrame>;
 }
 
 function RoleGuard({ roles, children }) {
@@ -329,11 +381,12 @@ function DocumentUploader({ files, onChange, existingCount = 0, multiple = true,
 }
 function ShopRegistrationPage() {
   const { firebaseUser, syncSession } = useAuth(); const navigate = useNavigate();
-  const [form, setForm] = useState({ shopName: '', address: '', contactNumber: '' }); const [files, setFiles] = useState([]); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
+  const [form, setForm] = useState({ shopName: '', address: '', municipality: '', province: DEFAULT_PROVINCE, contactNumber: '' }); const [files, setFiles] = useState([]); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const update = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+  const updateMunicipality = (e) => setForm((prev) => ({ ...prev, municipality: e.target.value, province: prev.province || DEFAULT_PROVINCE }));
   const selectFiles = (e) => { const list = Array.from(e.target.files || []); const problem = list.length > 5 ? 'Choose no more than five documents.' : validateFiles(list); if (problem) { setError(problem); setFiles([]); e.target.value = ''; return; } setError(''); setFiles(list); };
   const submit = async (e) => { e.preventDefault(); setBusy(true); setError(''); setNotice(''); try { const problem = validateFiles(files); if (problem) throw new Error(problem); const payload = new FormData(); payload.append('shop', new Blob([JSON.stringify(form)], { type: 'application/json' })); files.forEach((file) => payload.append('documents', file)); await api.post('/api/shops/register', payload); const next = await syncSession(firebaseUser); setNotice('Your shop registration was submitted for review.'); navigate(homeFor(next), { replace: true }); } catch (reason) { setError(apiErrorMessage(reason, 'Shop registration could not be submitted.')); } finally { setBusy(false); } };
-  return <><PageHeading eyebrow="Customer" title="Register your shop" description="Submit your shop profile and verification documents for platform review." /><section className="max-w-3xl rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="mb-6 flex items-start gap-3 rounded-2xl bg-teal-50 p-4 text-sm leading-6 text-teal-900"><ShieldCheck size={19} className="mt-0.5 shrink-0" /><p>One registration per eligible customer account. Once submitted, your account becomes the shop owner account.</p></div><ErrorBanner error={error} />{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-5"><TextField label="Shop name" required maxLength={160} autoComplete="organization" placeholder="e.g. Fresh Fold Laundry" value={form.shopName} onChange={update('shopName')} /><TextAreaField label="Shop address" required maxLength={500} rows={3} autoComplete="street-address" placeholder="Street, barangay, city, and province" value={form.address} onChange={update('address')} /><TextField label="Contact number" required type="tel" minLength={7} maxLength={32} autoComplete="tel" placeholder="e.g. +63 917 000 0000" value={form.contactNumber} onChange={update('contactNumber')} /><DocumentUploader files={files} onChange={selectFiles} /><button disabled={busy} className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? <><LoaderCircle size={18} className="animate-spin" />Submitting…</> : <>Submit for review <ArrowRight size={17} /></>}</button></form></section></>;
+  return <><PageHeading eyebrow="Customer" title="Register your shop" description="Submit your shop profile and verification documents for platform review." /><section className="max-w-3xl rounded-3xl border border-slate-100 bg-white p-6 shadow-soft sm:p-8"><div className="mb-6 flex items-start gap-3 rounded-2xl bg-teal-50 p-4 text-sm leading-6 text-teal-900"><ShieldCheck size={19} className="mt-0.5 shrink-0" /><p>One registration per eligible customer account. Once submitted, your account becomes the shop owner account.</p></div><ErrorBanner error={error} />{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-5"><TextField label="Shop name" required maxLength={160} autoComplete="organization" placeholder="e.g. Fresh Fold Laundry" value={form.shopName} onChange={update('shopName')} /><TextAreaField label="Shop address" required maxLength={500} rows={3} autoComplete="street-address" placeholder="Street, barangay, city, and province" value={form.address} onChange={update('address')} /><MunicipalityFields municipality={form.municipality} province={form.province} onMunicipalityChange={updateMunicipality} onProvinceChange={update('province')} /><TextField label="Contact number" required type="tel" minLength={7} maxLength={32} autoComplete="tel" placeholder="e.g. +63 917 000 0000" value={form.contactNumber} onChange={update('contactNumber')} /><DocumentUploader files={files} onChange={selectFiles} /><button disabled={busy} className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-brand px-5 font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? <><LoaderCircle size={18} className="animate-spin" />Submitting…</> : <>Submit for review <ArrowRight size={17} /></>}</button></form></section></>;
 }
 async function openPrivateDocument(document) {
   const { data } = await api.get(`/api/shops/documents/${document.id}`, { responseType: 'blob' });
@@ -342,10 +395,11 @@ async function openPrivateDocument(document) {
   window.document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(localUrl), 1500);
 }
 function RegistrationStatusPage() {
-  const [registration, setRegistration] = useState(null); const [form, setForm] = useState({ shopName: '', address: '', contactNumber: '' });
+  const [registration, setRegistration] = useState(null); const [form, setForm] = useState({ shopName: '', address: '', municipality: '', province: DEFAULT_PROVINCE, contactNumber: '' });
   const [files, setFiles] = useState([]); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [reload, setReload] = useState(0); const [pendingRemoval, setPendingRemoval] = useState(null); const [toast, setToast] = useState(null);
-  useEffect(() => { let active = true; setLoading(true); setError(''); api.get('/api/shops/mine/registration').then(({ data }) => { if (active) { setRegistration(data); setForm({ shopName: data.shopName || '', address: data.address || '', contactNumber: data.contactNumber || '' }); } }).catch((e) => { if (active) setError(apiErrorMessage(e)); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [reload]);
+  useEffect(() => { let active = true; setLoading(true); setError(''); api.get('/api/shops/mine/registration').then(({ data }) => { if (active) { setRegistration(data); setForm({ shopName: data.shopName || '', address: data.address || '', municipality: data.municipality || '', province: data.province || DEFAULT_PROVINCE, contactNumber: data.contactNumber || '' }); } }).catch((e) => { if (active) setError(apiErrorMessage(e)); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [reload]);
   const existing = registration?.documents || []; const update = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+  const updateMunicipality = (e) => setForm((prev) => ({ ...prev, municipality: e.target.value, province: prev.province || DEFAULT_PROVINCE }));
   const selectFiles = (e) => { const list = Array.from(e.target.files || []); const problem = validateFiles(list, existing.length); if (problem) { setError(problem); setFiles([]); e.target.value = ''; return; } setError(''); setFiles(list); };
   const download = async (doc) => { setError(''); try { await openPrivateDocument(doc); } catch (e) { setError(apiErrorMessage(e, 'The private document could not be opened.')); } };
   const remove = async (doc) => {
@@ -363,9 +417,9 @@ function RegistrationStatusPage() {
   };
   const resubmit = async (e) => { e.preventDefault(); setBusy(true); setError(''); setNotice(''); try { if (existing.length + files.length < 1) throw new Error('A resubmission must retain or include at least one verification document.'); if (existing.length + files.length > 5) throw new Error('A registration can have no more than five documents total.'); const payload = new FormData(); payload.append('shop', new Blob([JSON.stringify(form)], { type: 'application/json' })); files.forEach((file) => payload.append('documents', file)); await api.put('/api/shops/mine/registration', payload); setFiles([]); setNotice('Your updated registration has been resubmitted for review.'); setReload((v) => v + 1); } catch (e2) { setError(apiErrorMessage(e2, 'The registration could not be resubmitted.')); } finally { setBusy(false); } };
   if (loading) return <LoadingState label="Loading registration status…" />;
-  return <><Toast type={toast?.type} message={toast?.message} onDismiss={() => setToast(null)} /><PageHeading eyebrow="Owner workspace" title="Shop registration" description="Review your status, documents, and any requested changes." /><ErrorBanner error={error} onRetry={() => setReload((v) => v + 1)} />{notice && <p role="status" className="mb-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}{!registration ? <EmptyState title="Registration not found" icon={Store}>No shop registration is attached to this owner account.</EmptyState> : <div className="grid gap-6 xl:grid-cols-[.9fr_1.1fr]"><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Current status</p><h2 className="mt-2 text-xl font-semibold">{registration.shopName}</h2></div><StatusPill status={registration.status} /></div><div className={`mt-5 rounded-2xl p-4 text-sm leading-6 ${registration.status === 'PENDING' ? 'bg-amber-50 text-amber-900' : registration.status === 'REJECTED' || registration.status === 'DEACTIVATED' ? 'bg-rose-50 text-rose-900' : 'bg-emerald-50 text-emerald-900'}`}>{registration.status === 'PENDING' ? 'Your registration is waiting for platform review.' : registration.status === 'REJECTED' ? registration.rejectionReason || 'Please update your registration and resubmit.' : registration.status === 'DEACTIVATED' ? 'This shop is deactivated. Shop operations are blocked; contact the platform administrator.' : 'Your shop registration is active.'}</div><dl className="mt-5 space-y-4 text-sm"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Address</dt><dd className="mt-1 text-slate-700">{registration.address}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Contact</dt><dd className="mt-1 text-slate-700">{registration.contactNumber}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Registered</dt><dd className="mt-1 text-slate-700">{dateLabel(registration.registeredAt)}</dd></div></dl></section><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Private files</p><h2 className="mt-1 text-lg font-semibold">Verification documents</h2></div><span className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{existing.length}/5</span></div>{existing.length === 0 ? <p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No documents are attached.</p> : <ul className="mt-4 divide-y divide-slate-100 rounded-2xl border border-slate-100">{existing.map((doc) => <li key={doc.id} className="flex flex-wrap items-center justify-between gap-2 p-3"><div className="flex min-w-0 items-center gap-3"><FileText size={18} className="shrink-0 text-brand" /><div className="min-w-0"><p className="truncate text-sm font-medium">{doc.originalFilename}</p><p className="text-xs text-slate-500">{doc.contentType} · {(doc.sizeBytes / (1024 * 1024)).toFixed(2)} MB</p></div></div><div className="flex gap-1"><button type="button" onClick={() => download(doc)} className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-brand hover:bg-teal-50"><Download size={14} />Open</button>{registration.status === 'REJECTED' && <button type="button" disabled={busy} onClick={() => setPendingRemoval(doc)} className="min-h-9 rounded-lg px-2 text-xs font-semibold text-rose-700 hover:bg-rose-50">Remove</button>}</div></li>)}</ul>}
+  return <><Toast type={toast?.type} message={toast?.message} onDismiss={() => setToast(null)} /><PageHeading eyebrow="Owner workspace" title="Shop registration" description="Review your status, documents, and any requested changes." /><ErrorBanner error={error} onRetry={() => setReload((v) => v + 1)} />{notice && <p role="status" className="mb-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}{!registration ? <EmptyState title="Registration not found" icon={Store}>No shop registration is attached to this owner account.</EmptyState> : <div className="grid gap-6 xl:grid-cols-[.9fr_1.1fr]"><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Current status</p><h2 className="mt-2 text-xl font-semibold">{registration.shopName}</h2></div><StatusPill status={registration.status} /></div><div className={`mt-5 rounded-2xl p-4 text-sm leading-6 ${registration.status === 'PENDING' ? 'bg-amber-50 text-amber-900' : registration.status === 'REJECTED' || registration.status === 'DEACTIVATED' ? 'bg-rose-50 text-rose-900' : 'bg-emerald-50 text-emerald-900'}`}>{registration.status === 'PENDING' ? 'Your registration is waiting for platform review.' : registration.status === 'REJECTED' ? registration.rejectionReason || 'Please update your registration and resubmit.' : registration.status === 'DEACTIVATED' ? 'This shop is deactivated. Shop operations are blocked; contact the platform administrator.' : 'Your shop registration is active.'}</div><dl className="mt-5 space-y-4 text-sm"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Address</dt><dd className="mt-1 text-slate-700">{registration.address}</dd></div>{(registration.municipality || registration.province) && <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Municipality / Province</dt><dd className="mt-1 text-slate-700">{[registration.municipality, registration.province].filter(Boolean).join(', ')}</dd></div>}<div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Contact</dt><dd className="mt-1 text-slate-700">{registration.contactNumber}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Registered</dt><dd className="mt-1 text-slate-700">{dateLabel(registration.registeredAt)}</dd></div></dl></section><section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-soft"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Private files</p><h2 className="mt-1 text-lg font-semibold">Verification documents</h2></div><span className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{existing.length}/5</span></div>{existing.length === 0 ? <p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No documents are attached.</p> : <ul className="mt-4 divide-y divide-slate-100 rounded-2xl border border-slate-100">{existing.map((doc) => <li key={doc.id} className="flex flex-wrap items-center justify-between gap-2 p-3"><div className="flex min-w-0 items-center gap-3"><FileText size={18} className="shrink-0 text-brand" /><div className="min-w-0"><p className="truncate text-sm font-medium">{doc.originalFilename}</p><p className="text-xs text-slate-500">{doc.contentType} · {(doc.sizeBytes / (1024 * 1024)).toFixed(2)} MB</p></div></div><div className="flex gap-1"><button type="button" onClick={() => download(doc)} className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-brand hover:bg-teal-50"><Download size={14} />Open</button>{registration.status === 'REJECTED' && <button type="button" disabled={busy} onClick={() => setPendingRemoval(doc)} className="min-h-9 rounded-lg px-2 text-xs font-semibold text-rose-700 hover:bg-rose-50">Remove</button>}</div></li>)}</ul>}
     <p className="mt-3 text-xs leading-5 text-slate-400">Documents are downloaded through the authenticated API; no public file URL is used.</p>
-    {registration.status === 'REJECTED' && <form onSubmit={resubmit} className="mt-6 space-y-4 border-t border-slate-100 pt-5"><div><h3 className="font-semibold">Edit and resubmit</h3><p className="mt-1 text-xs leading-5 text-slate-500">Update the shop details and/or documents requested by the administrator.</p></div><TextField label="Shop name" required maxLength={160} value={form.shopName} onChange={update('shopName')} /><TextAreaField label="Shop address" required maxLength={500} rows={3} value={form.address} onChange={update('address')} /><TextField label="Contact number" required type="tel" minLength={7} maxLength={32} value={form.contactNumber} onChange={update('contactNumber')} /><DocumentUploader files={files} onChange={selectFiles} existingCount={existing.length} title="Add verification documents" /><button disabled={busy} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Resubmitting…' : 'Resubmit for review'}</button></form>}</section></div>}{pendingRemoval && <ConfirmDialog
+    {registration.status === 'REJECTED' && <form onSubmit={resubmit} className="mt-6 space-y-4 border-t border-slate-100 pt-5"><div><h3 className="font-semibold">Edit and resubmit</h3><p className="mt-1 text-xs leading-5 text-slate-500">Update the shop details and/or documents requested by the administrator.</p></div><TextField label="Shop name" required maxLength={160} value={form.shopName} onChange={update('shopName')} /><TextAreaField label="Shop address" required maxLength={500} rows={3} value={form.address} onChange={update('address')} /><MunicipalityFields municipality={form.municipality} province={form.province} onMunicipalityChange={updateMunicipality} onProvinceChange={update('province')} /><TextField label="Contact number" required type="tel" minLength={7} maxLength={32} value={form.contactNumber} onChange={update('contactNumber')} /><DocumentUploader files={files} onChange={selectFiles} existingCount={existing.length} title="Add verification documents" /><button disabled={busy} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-60">{busy ? 'Resubmitting…' : 'Resubmit for review'}</button></form>}</section></div>}{pendingRemoval && <ConfirmDialog
     title="Remove verification document?"
     message={`Remove "${pendingRemoval.originalFilename}" from ${registration.shopName}? This cannot be undone.`}
     confirmLabel="Remove"
@@ -379,7 +433,7 @@ function RegistrationStatusPage() {
 }
 function ShopProfilePage() {
   const [profile, setProfile] = useState(null);
-  const [form, setForm] = useState({ name: '', address: '', contactNumber: '', latitude: '', longitude: '' });
+  const [form, setForm] = useState({ name: '', address: '', municipality: '', province: DEFAULT_PROVINCE, contactNumber: '', latitude: '', longitude: '' });
   const [showMap, setShowMap] = useState(false);
   const [geoStatus, setGeoStatus] = useState('');
   const [loading, setLoading] = useState(true);
@@ -396,6 +450,8 @@ function ShopProfilePage() {
         setForm({
           name: data.name || '',
           address: data.address || '',
+          municipality: data.municipality || '',
+          province: data.province || DEFAULT_PROVINCE,
           contactNumber: data.contactNumber || '',
           latitude: data.latitude != null ? String(data.latitude) : '',
           longitude: data.longitude != null ? String(data.longitude) : '',
@@ -406,6 +462,7 @@ function ShopProfilePage() {
   }, [reload]);
 
   const update = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+  const updateMunicipality = (e) => setForm((prev) => ({ ...prev, municipality: e.target.value, province: prev.province || DEFAULT_PROVINCE }));
 
   const useMyLocation = () => {
     if (!navigator.geolocation) { setGeoStatus('Your browser does not support location access.'); return; }
@@ -444,11 +501,14 @@ function ShopProfilePage() {
     try {
       const { data } = await api.put('/api/shops/mine', {
         name: form.name, address: form.address, contactNumber: form.contactNumber,
+        municipality: form.municipality || null, province: form.province || null,
         latitude: lat, longitude: lng,
       });
       setProfile(data);
       setForm({
         name: data.name, address: data.address, contactNumber: data.contactNumber,
+        municipality: data.municipality || '',
+        province: data.province || DEFAULT_PROVINCE,
         latitude: data.latitude != null ? String(data.latitude) : '',
         longitude: data.longitude != null ? String(data.longitude) : '',
       });
@@ -477,9 +537,16 @@ function ShopProfilePage() {
           <StatusPill status={profile.status} />
         </div>
         {notice && <p role="status" className="mb-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
+        {(!profile.municipality || profile.latitude == null || profile.longitude == null) && (
+          <div role="note" className="mb-4 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+            <p>Set your shop&rsquo;s municipality and map pin below so customers can find you in &ldquo;Near me&rdquo; searches with accurate distances.</p>
+          </div>
+        )}
         <form onSubmit={save} className="space-y-5">
           <TextField label="Shop name" required maxLength={160} value={form.name} onChange={update('name')} />
           <TextAreaField label="Shop address" required maxLength={500} rows={3} value={form.address} onChange={update('address')} />
+          <MunicipalityFields municipality={form.municipality} province={form.province} onMunicipalityChange={updateMunicipality} onProvinceChange={update('province')} />
           <TextField label="Contact number" required type="tel" minLength={7} maxLength={32} value={form.contactNumber} onChange={update('contactNumber')} />
 
           {/* Location section */}
@@ -510,13 +577,13 @@ function ShopProfilePage() {
               <label className="block text-xs font-medium text-slate-700">
                 Latitude <span className="font-normal text-slate-400">(-90 to 90)</span>
                 <input type="number" step="any" min="-90" max="90" value={form.latitude} onChange={update('latitude')}
-                  placeholder="e.g. 14.5995"
+                  placeholder="e.g. 10.3772"
                   className="mt-1 min-h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-brand focus:ring-4 focus:ring-teal-50" />
               </label>
               <label className="block text-xs font-medium text-slate-700">
                 Longitude <span className="font-normal text-slate-400">(-180 to 180)</span>
                 <input type="number" step="any" min="-180" max="180" value={form.longitude} onChange={update('longitude')}
-                  placeholder="e.g. 120.9842"
+                  placeholder="e.g. 123.9578"
                   className="mt-1 min-h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-brand focus:ring-4 focus:ring-teal-50" />
               </label>
             </div>
@@ -627,13 +694,28 @@ function AdminUsersPage() {
   useEffect(() => {
     let active = true; setLoading(true); setError('');
     api.get('/api/admin/users', { params: { ...(role ? { role } : {}), page } })
-      .then(({ data: result }) => { if (active) setData(result); })
+      .then(({ data: result }) => { if (active) setData(normalizePagedRows(result)); })
       .catch((reason) => { if (active) setError(apiErrorMessage(reason)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [role, page, reload]);
-  const rows = data?.content || []; const size = data?.size || 20; const total = data?.totalElements || 0; const pages = Math.max(1, Math.ceil(total / size));
+  const rows = Array.isArray(data?.content) ? data.content : []; const size = data?.size || 20; const total = data?.totalElements || 0; const pages = Math.max(1, Math.ceil(total / size));
   return <><PageHeading eyebrow="Platform administration" title="Users" description="Review account roles and current presence. Customer email addresses are not included." /><section className="rounded-3xl border border-slate-100 bg-white p-4 shadow-soft sm:p-5"><label className="block max-w-sm text-sm font-medium text-slate-700">Filter by role<select value={role} onChange={(event) => { setRole(event.target.value); setPage(0); }} className="mt-1.5 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-brand focus:ring-4 focus:ring-teal-50"><option value="">All roles</option>{['PLATFORM_ADMIN', 'OWNER', 'STAFF', 'CUSTOMER'].map((value) => <option key={value} value={value}>{humanRole(value)}</option>)}</select></label></section><div className="mt-5">{error && <ErrorBanner error={error} onRetry={() => setReload((value) => value + 1)} />}{loading ? <LoadingState label="Loading users…" /> : error ? null : !rows.length ? <EmptyState icon={Users} title="No users found">No accounts match this role filter.</EmptyState> : <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-soft"><div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold">Account directory</h2><p className="mt-0.5 text-xs text-slate-500">{total} total accounts · {size} per page</p></div><span className="text-xs text-slate-500">Page {page + 1} of {pages}</span></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-[10px] uppercase tracking-[.13em] text-slate-400"><tr><th className="px-5 py-3 font-bold">Name</th><th className="px-4 py-3 font-bold">Email</th><th className="px-4 py-3 font-bold">Role</th><th className="px-4 py-3 font-bold">Presence</th><th className="px-5 py-3 font-bold">Last seen</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((user, index) => <tr key={`${user.role}-${user.name || 'user'}-${index}`}><td className="px-5 py-4 font-medium text-ink">{user.name || '—'}</td><td className="px-4 py-4 text-slate-500">{user.email || (user.role === 'CUSTOMER' ? 'Not displayed' : '—')}</td><td className="px-4 py-4"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">{humanRole(user.role)}</span></td><td className="px-4 py-4"><span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-semibold ${user.online ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}><span className={`h-2 w-2 rounded-full ${user.online ? 'bg-emerald-500' : 'bg-slate-400'}`} aria-hidden="true" />{user.online ? 'Online' : 'Offline'}</span></td><td className="px-5 py-4 text-xs text-slate-500">{lastSeenLabel(user.lastSeen)}</td></tr>)}</tbody></table></div><div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-3"><p className="text-xs text-slate-500">Showing {rows.length} of {total}</p><div className="flex gap-2"><button type="button" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))} className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-semibold disabled:opacity-40"><ChevronLeft size={15} />Previous</button><button type="button" disabled={page + 1 >= pages} onClick={() => setPage((value) => Math.min(pages - 1, value + 1))} className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-semibold disabled:opacity-40">Next<ChevronRight size={15} /></button></div></div></div>}</div></>;
+}
+
+class AppErrorBoundary extends Component {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() { return { hasError: true }; }
+
+  componentDidCatch(error) {
+    console.error('SpindleTrack UI rendering error', error?.name || 'Error');
+  }
+
+  render() {
+    if (this.state.hasError) return <main className="grid min-h-[100dvh] place-items-center bg-canvas px-5"><section className="max-w-md rounded-3xl border border-slate-100 bg-white p-7 text-center shadow-soft"><h1 className="text-xl font-semibold text-ink">Something went wrong</h1><p className="mt-2 text-sm leading-6 text-slate-600">Reload the page to try again.</p><button type="button" onClick={() => window.location.reload()} className="mt-5 min-h-11 rounded-xl bg-brand px-5 text-sm font-semibold text-white">Reload page</button></section></main>;
+    return this.props.children;
+  }
 }
 
 function AppRoutes() {
@@ -641,7 +723,7 @@ function AppRoutes() {
   const location = useLocation();
   useEffect(() => { if (!session) rememberInvitationReturn(location); }, [location.pathname, location.search, session]);
   if (loading) return <LoadingState label="Checking your account…" />;
-  if (!session) return <Routes><Route path="/accept-invitation" element={<AcceptInvitationPage />} /><Route path="/track-order" element={<PublicOrderLookupPage />} /><Route path="/shops/*" element={<PublicShopsPage />} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
+  if (publicLayoutMode(session) === 'public') return <Routes><Route path="/accept-invitation" element={<PublicFrame><AcceptInvitationPage /></PublicFrame>} /><Route path="/track-order" element={<PublicFrame><PublicOrderLookupPage /></PublicFrame>} /><Route path="/shops/*" element={<PublicFrame><PublicShopsPage /></PublicFrame>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
   return <AppShell><Routes>
     <Route path="/" element={<Navigate to={postAuthDestination(session, '')} replace />} />
     <Route path="/track-order" element={<PublicOrderLookupPage />} />
@@ -657,6 +739,7 @@ function AppRoutes() {
     <Route path="/owner/orders" element={<RoleGuard roles={['OWNER']}><OrdersListPage readOnly /></RoleGuard>} />
     <Route path="/owner/orders/:orderId" element={<RoleGuard roles={['OWNER']}><OrderDetailPage readOnly /></RoleGuard>} />
     <Route path="/owner/services" element={<RoleGuard roles={['OWNER']}><OwnerServicesPage /></RoleGuard>} />
+    <Route path="/owner/add-ons" element={<RoleGuard roles={['OWNER']}><OwnerAddOnsPage /></RoleGuard>} />
     <Route path="/owner/staff" element={<RoleGuard roles={['OWNER']}><OwnerStaffPage /></RoleGuard>} />
     <Route path="/owner/unclaimed" element={<RoleGuard roles={['OWNER']}><OwnerUnclaimedPage /></RoleGuard>} />
     <Route path="/owner/reports" element={<RoleGuard roles={['OWNER']}><OwnerReportsPage /></RoleGuard>} />
@@ -674,4 +757,4 @@ function AppRoutes() {
     <Route path="*" element={<Navigate to={homeFor(session)} replace />} />
   </Routes></AppShell>;
 }
-export default function App() { return <AppRoutes />; }
+export default function App() { return <AppErrorBoundary><AppRoutes /></AppErrorBoundary>; }

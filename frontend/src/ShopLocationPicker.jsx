@@ -13,9 +13,9 @@ export default function ShopLocationPicker({ lat, lng, onChange }) {
   const mapRef = useRef(null);
   const markerRef = useRef(null);
 
-  // Default to Metro Manila when no coordinates are set yet
-  const initialLat = lat != null ? lat : 14.5995;
-  const initialLng = lng != null ? lng : 120.9842;
+  // Default to Consolacion, Cebu when no coordinates are set yet
+  const initialLat = lat != null ? lat : 10.3772;
+  const initialLng = lng != null ? lng : 123.9578;
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;

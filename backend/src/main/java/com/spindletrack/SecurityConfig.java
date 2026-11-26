@@ -50,6 +50,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/auth/session").authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/shops/register").hasRole("CUSTOMER")
                         .requestMatchers(HttpMethod.GET, "/api/shops/mine/registration").hasRole("OWNER")
+                        .requestMatchers(HttpMethod.POST, "/api/shops/services").hasRole("OWNER")
+                        .requestMatchers(HttpMethod.POST, "/api/shops/services/**").hasRole("OWNER")
+                        .requestMatchers(HttpMethod.PUT, "/api/shops/services/**").hasRole("OWNER")
                         .anyRequest().authenticated());
 
         FirebaseBearerAuthenticationFilter firebaseFilter = firebaseFilterProvider.getIfAvailable();
@@ -62,7 +65,7 @@ public class SecurityConfig {
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173"));
+        configuration.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.1.5:5173", "https://recorder-symposium-diffs-bet.trycloudflare.com"));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         configuration.setAllowCredentials(false);

@@ -20,6 +20,12 @@ public class OwnerOperationsController {
         return operations.unclaimed(principal);
     }
 
+    @GetMapping("/ready-orders")
+    @PreAuthorize("hasAnyRole('OWNER','STAFF')")
+    public OwnerOperationsService.ReadyAndClaimedResult readyOrders(@AuthenticationPrincipal FirebasePrincipal principal) {
+        return operations.readyOrders(principal);
+    }
+
     @GetMapping("/reports")
     @PreAuthorize("hasRole('OWNER')")
     public OwnerOperationsService.OwnerReport reports(@AuthenticationPrincipal FirebasePrincipal principal) {

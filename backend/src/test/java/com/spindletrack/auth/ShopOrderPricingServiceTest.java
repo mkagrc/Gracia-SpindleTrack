@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -26,7 +27,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 class ShopOrderPricingServiceTest {
     @Test
-    void createUsesManuallyEnteredKilosAndPriceAndAppendsInitialPriceAndNamedStageEntries() throws Exception {
+    void createUsesStoredCatalogPriceAndAppendsInitialPriceAndNamedStageEntries() throws Exception {
         Fixture f = new Fixture();
         f.transactionHarness();
         ShopOrderService service = new ShopOrderService(f.firebase);
@@ -47,7 +48,8 @@ class ShopOrderPricingServiceTest {
         verify(f.tx).create(eq(f.order), argThat(values -> Long.valueOf(12345L).equals(values.get("totalPriceCentavos"))
                 && "UNPAID".equals(values.get("paymentStatus")) && values.get("paymentMethod") == null
                 && values.get("paidAt") == null && values.get("paidByUid") == null && values.get("paidByName") == null
-                && !values.containsKey("items") && !values.containsKey("total")));
+                && !values.containsKey("items") && Long.valueOf(12345L).equals(values.get("totalPriceCentavos"))
+                && new BigDecimal(values.get("total").toString()).compareTo(new BigDecimal("123.45")) == 0));
         verify(f.tx).create(eq(f.priceLog), argThat(values -> values.get("previousPrice") == null
                 && Long.valueOf(12345L).equals(values.get("newPrice")) && "CENTAVOS".equals(values.get("priceUnit"))
                 && "staff-uid".equals(values.get("changedByUid")) && "Staff Display".equals(values.get("changedByName"))));
@@ -217,6 +219,8 @@ class ShopOrderPricingServiceTest {
     @Test
     void onlineLinkStoresPendingAmountAndOrderReferenceAndConfirmsOnlyMatchingPayment() throws Exception {
         Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
         PayMongoGateway gateway = mock(PayMongoGateway.class);
         when(gateway.createPaymentLink(12345L, "order-A", "O-000001")).thenReturn(new PayMongoGateway.CreatedLink("link-abc", "https://pm.link/test", 12345L, "PHP", "ref-1"));
         ShopOrderService service = new ShopOrderService(f.firebase, gateway);
@@ -235,6 +239,21 @@ class ShopOrderPricingServiceTest {
         ShopOrderService.OrderSummary paid = service.confirmOnlinePayment(f.staff(), "order-A");
         assertEquals("PAID", paid.paymentStatus()); assertEquals("ONLINE", paid.paymentMethod());
         verify(f.tx).update(eq(f.order), argThat(values -> "PAID".equals(values.get("paymentStatus")) && "ONLINE".equals(values.get("paymentMethod"))));
+    }
+
+    @Test
+    void cashPreferenceRejectsPaymentLinkCreation() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("CASH");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
+        PayMongoGateway gateway = mock(PayMongoGateway.class);
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+                () -> new ShopOrderService(f.firebase, gateway).createPaymentLink(f.staff(), "order-A"));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(gateway, never()).createPaymentLink(any(Long.class), eq("order-A"), any(String.class));
+        verify(f.tx, never()).update(eq(f.order), any(Map.class));
     }
 
     @Test
@@ -347,6 +366,8 @@ class ShopOrderPricingServiceTest {
             when(orders.document()).thenReturn(order);
             when(orders.document("order-A")).thenReturn(order);
             when(payments.document()).thenReturn(paymentRecord);
+            when(payments.document("cash-order-A")).thenReturn(paymentRecord);
+            when(payments.document(startsWith("online-"))).thenReturn(paymentRecord);
             when(paymentRecord.getId()).thenReturn("payment-doc-A");
             when(payments.document("payment-doc-A")).thenReturn(paymentRecord);
             when(order.getId()).thenReturn("order-A");
@@ -362,6 +383,7 @@ class ShopOrderPricingServiceTest {
             when(serviceSnapshot.getString("name")).thenReturn("Wash");
             when(serviceSnapshot.getString("unit")).thenReturn("kg");
             when(serviceSnapshot.getBoolean("active")).thenReturn(true);
+            when(serviceSnapshot.get("pricePerUnit")).thenReturn(new BigDecimal("52.53"));
         }
 
         void prepareExistingOrder(String ownerShop) throws Exception {
