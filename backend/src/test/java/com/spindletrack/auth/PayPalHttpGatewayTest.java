@@ -1,7 +1,10 @@
 package com.spindletrack.auth;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -11,6 +14,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import java.math.BigDecimal;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -102,5 +106,75 @@ class PayPalHttpGatewayTest {
         ResponseStatusException badGateway = assertThrows(ResponseStatusException.class,
                 () -> failing.createOrder(new BigDecimal("100.00"), "order-1", "O-000001"));
         assertEquals(HttpStatus.BAD_GATEWAY, badGateway.getStatusCode());
+    }
+
+    @Test
+    void blankAndQuotedBaseUrlsNormalizeToValidDefaultOrTrimmedUrl() {
+        for (String blank : new String[] { null, "", "   ", "\"\"", "''", "  \"  \"  " }) {
+            assertEquals("https://api-m.sandbox.paypal.com", PayPalHttpGateway.normalizeAndValidateBaseUrl(blank));
+            assertDoesNotThrow(() -> new PayPalHttpGateway(
+                    "client-id-1", "client-secret-1", blank, "", "   "));
+        }
+
+        for (String quoted : new String[] {
+                "\"https://api-m.sandbox.paypal.com\"",
+                "'https://api-m.sandbox.paypal.com/'",
+                "  \" https://api-m.sandbox.paypal.com/ \"  "
+        }) {
+            assertEquals("https://api-m.sandbox.paypal.com", PayPalHttpGateway.normalizeAndValidateBaseUrl(quoted));
+            assertDoesNotThrow(() -> new PayPalHttpGateway(
+                    "\"client-id-1\"", "'client-secret-1'", quoted,
+                    "\"http://localhost:5173/paypal/return\"", "'http://localhost:5173/paypal/cancel'"));
+        }
+    }
+
+    @Test
+    void invalidBaseUrlThrowsClearMessageWithoutSecretsAndBootDoesNotFail() {
+        for (String invalid : new String[] {
+                "http://api-m.sandbox.paypal.com",
+                "not a valid url",
+                "https://",
+                "\"https://api-m.sandbox.paypal.com",
+                "/",
+                "https://user:supersecret@api-m.sandbox.paypal.com"
+        }) {
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                    () -> PayPalHttpGateway.normalizeAndValidateBaseUrl(invalid));
+            assertEquals(PayPalHttpGateway.INVALID_BASE_URL_MESSAGE, ex.getMessage());
+            assertFalse(ex.getMessage().contains("supersecret"));
+
+            PayPalHttpGateway gateway = assertDoesNotThrow(() -> new PayPalHttpGateway(
+                    "secret-client-id", "secret-client-secret", invalid,
+                    "http://localhost:5173/paypal/return", "http://localhost:5173/paypal/cancel"));
+
+            ResponseStatusException createEx = assertThrows(ResponseStatusException.class,
+                    () -> gateway.createOrder(new BigDecimal("100.00"), "order-1", "O-000001"));
+            assertEquals(HttpStatus.SERVICE_UNAVAILABLE, createEx.getStatusCode());
+            assertTrue(createEx.getReason().contains("PAYPAL_BASE_URL must be a valid https URL"));
+            assertFalse(createEx.getReason().contains("secret-client-secret"));
+
+            ResponseStatusException captureEx = assertThrows(ResponseStatusException.class,
+                    () -> gateway.captureOrder("PP-ORD-123"));
+            assertEquals(HttpStatus.SERVICE_UNAVAILABLE, captureEx.getStatusCode());
+            assertTrue(captureEx.getReason().contains("PAYPAL_BASE_URL must be a valid https URL"));
+        }
+    }
+
+    @Test
+    void springContextStartsEvenWhenPayPalBaseUrlIsInvalidAndReturns503OnPayPalCalls() {
+        new ApplicationContextRunner()
+                .withBean(PayPalHttpGateway.class)
+                .withPropertyValues(
+                        "paypal.client-id=secret-id",
+                        "paypal.client-secret=secret-val",
+                        "paypal.base-url=http://bad authority url")
+                .run(context -> {
+                    assertTrue(context.getStartupFailure() == null);
+                    PayPalGateway gateway = context.getBean(PayPalGateway.class);
+                    ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                            () -> gateway.createOrder(new BigDecimal("50.00"), "order-99", "O-000099"));
+                    assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.getStatusCode());
+                    assertEquals(PayPalHttpGateway.INVALID_BASE_URL_MESSAGE, ex.getReason());
+                });
     }
 }

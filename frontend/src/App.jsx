@@ -724,7 +724,7 @@ function AppRoutes() {
   const location = useLocation();
   useEffect(() => { if (!session) rememberInvitationReturn(location); }, [location.pathname, location.search, session]);
   if (loading) return <LoadingState label="Checking your account…" />;
-  if (publicLayoutMode(session) === 'public') return <Routes><Route path="/accept-invitation" element={<PublicFrame><AcceptInvitationPage /></PublicFrame>} /><Route path="/track-order" element={<PublicFrame><PublicOrderLookupPage /></PublicFrame>} /><Route path="/shops/*" element={<PublicFrame><PublicShopsPage /></PublicFrame>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
+  if (publicLayoutMode(session) === 'public') return <Routes><Route path="/accept-invitation" element={<PublicFrame><AcceptInvitationPage /></PublicFrame>} /><Route path="/track-order" element={<PublicFrame><PublicOrderLookupPage /></PublicFrame>} /><Route path="/paypal/return" element={<PublicFrame><PayPalReturnPage mode="return" /></PublicFrame>} /><Route path="/paypal/cancel" element={<PublicFrame><PayPalReturnPage mode="cancel" /></PublicFrame>} /><Route path="/shops/*" element={<PublicFrame><PublicShopsPage /></PublicFrame>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/create-account" element={<SignInPage />} /><Route path="*" element={<HomePage />} /></Routes>;
   return <AppShell><Routes>
     <Route path="/" element={<Navigate to={postAuthDestination(session, '')} replace />} />
     <Route path="/track-order" element={<PublicOrderLookupPage />} />
@@ -749,8 +749,8 @@ function AppRoutes() {
     <Route path="/staff/orders" element={<RoleGuard roles={['STAFF']}><OrdersListPage /></RoleGuard>} />
     <Route path="/staff/orders/:orderId" element={<RoleGuard roles={['STAFF']}><OrderDetailPage /></RoleGuard>} />
     <Route path="/staff/unclaimed" element={<RoleGuard roles={['STAFF']}><OwnerUnclaimedPage staff /></RoleGuard>} />
-    <Route path="/paypal/return" element={<RoleGuard roles={['STAFF']}><PayPalReturnPage mode="return" /></RoleGuard>} />
-    <Route path="/paypal/cancel" element={<RoleGuard roles={['STAFF']}><PayPalReturnPage mode="cancel" /></RoleGuard>} />
+    <Route path="/paypal/return" element={<RoleGuard roles={['CUSTOMER', 'STAFF']}><PayPalReturnPage mode="return" /></RoleGuard>} />
+    <Route path="/paypal/cancel" element={<RoleGuard roles={['CUSTOMER', 'STAFF']}><PayPalReturnPage mode="cancel" /></RoleGuard>} />
     <Route path="/admin/shops" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopsPage /></RoleGuard>} />
     <Route path="/admin/shops/:id" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminShopDetailPage /></RoleGuard>} />
     <Route path="/admin/users" element={<RoleGuard roles={['PLATFORM_ADMIN']}><AdminUsersPage /></RoleGuard>} />

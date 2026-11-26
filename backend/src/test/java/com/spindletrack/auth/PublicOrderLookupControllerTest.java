@@ -3,6 +3,7 @@ package com.spindletrack.auth;
 import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.server.ResponseStatusException;
@@ -63,5 +65,35 @@ class PublicOrderLookupControllerTest {
         mvc.perform(get("/api/public/orders/lookup").param("orderCode", "bad").param("mobile", "bad"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.message").value("Order could not be found. Check the order code and mobile number."));
+    }
+
+    @Test
+    void publicPayPalOrderAndCaptureArePermitAllAndNeverExposePrivateFields() throws Exception {
+        when(clientAddresses.resolve(any(HttpServletRequest.class))).thenReturn("127.0.0.1");
+        when(lookups.createPublicPayPalOrder(any(), any())).thenReturn(
+                new PublicOrderLookupService.PublicPayPalOrderResponse(
+                        "O-000123", "PENDING", "PP-PUB-1", "https://www.sandbox.paypal.com/checkoutnow?token=PP-PUB-1"));
+        when(lookups.capturePublicPayPalOrder(any(), any())).thenReturn(
+                new PublicOrderLookupService.PublicPayPalCaptureResponse("O-000123", "PAID", "PP-PUB-1"));
+
+        mvc.perform(post("/api/public/orders/paypal-order")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"orderCode\":\"O-000123\",\"mobile\":\"639171234567\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderCode").value("O-000123"))
+                .andExpect(jsonPath("$.paypalOrderId").value("PP-PUB-1"))
+                .andExpect(jsonPath("$.approvalUrl").value("https://www.sandbox.paypal.com/checkoutnow?token=PP-PUB-1"))
+                .andExpect(jsonPath("$.totalPrice").doesNotExist())
+                .andExpect(jsonPath("$.customerName").doesNotExist())
+                .andExpect(jsonPath("$.mobile").doesNotExist())
+                .andExpect(jsonPath("$.shopId").doesNotExist());
+
+        mvc.perform(post("/api/public/orders/paypal-capture")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"orderCode\":\"O-000123\",\"mobile\":\"639171234567\",\"paypalOrderId\":\"PP-PUB-1\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paymentStatus").value("PAID"))
+                .andExpect(jsonPath("$.totalPrice").doesNotExist())
+                .andExpect(jsonPath("$.mobile").doesNotExist());
     }
 }

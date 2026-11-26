@@ -1,19 +1,33 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, LoaderCircle, Receipt, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ExternalLink, LoaderCircle, Receipt, RefreshCw } from 'lucide-react';
 import api, { apiErrorMessage } from './api.js';
 import { formatDateTime, formatOrderPaymentMethod, formatPaymentMethod, formatPaymentStatus, formatPeso } from './formatters.js';
-import { normalizeOrderDetailResponse } from './orderPageData.js';
+import { isPayPalCheckoutEligible, normalizeOrderDetailResponse } from './orderPageData.js';
+import { savePendingPayPalOrder } from './paypalSession.js';
 import OrderStatusTracker, { stageDisplayLabel } from './components/OrderStatusTracker.jsx';
 import OrderQuantityBadge from './components/OrderQuantityBadge.jsx';
 import InvoiceSection from './InvoiceSection.jsx';
+
+function createClientRequestId(cryptoSource = globalThis.crypto) {
+  if (cryptoSource?.randomUUID) return cryptoSource.randomUUID();
+  if (!cryptoSource?.getRandomValues) throw new Error('Secure UUID generation is unavailable.');
+  const bytes = cryptoSource.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 export default function CustomerOrderDetailPage() {
   const { orderId } = useParams();
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [payBusy, setPayBusy] = useState(false);
+  const [payError, setPayError] = useState('');
   const [reload, setReload] = useState(0);
+  const requestIdRef = useRef('');
 
   useEffect(() => {
     let active = true;
@@ -34,6 +48,39 @@ export default function CustomerOrderDetailPage() {
 
   const order = detail?.order;
   const paid = order?.paymentStatus === 'PAID';
+  const payEligible = isPayPalCheckoutEligible(order);
+  const payAtClaimWaiting = !paid && order?.paymentMethodPreference === 'ONLINE'
+    && order?.paymentTiming === 'PAY_AT_CLAIM' && order?.stage !== 'READY' && order?.stage !== 'CLAIMED';
+
+  const payWithPayPal = async () => {
+    setPayBusy(true);
+    setPayError('');
+    try {
+      if (!requestIdRef.current) requestIdRef.current = createClientRequestId();
+      const { data } = await api.post(`/api/me/orders/${encodeURIComponent(orderId)}/payments/paypal-order`, {
+        clientRequestId: requestIdRef.current,
+      });
+      const approvalUrl = data.approvalUrl || data.paymentLinkUrl;
+      const paypalOrderId = data.paypalOrderId || data.paymentLinkId;
+      const storage = typeof window !== 'undefined' ? window.sessionStorage : null;
+      savePendingPayPalOrder(storage, {
+        flow: 'customer',
+        orderId,
+        orderCode: data.order?.orderCode || order?.orderCode || '',
+        paypalOrderId,
+      });
+      if (approvalUrl && typeof window !== 'undefined') {
+        window.location.assign(approvalUrl);
+        return;
+      }
+      setPayError('PayPal checkout link is unavailable. Please try again.');
+    } catch (reason) {
+      requestIdRef.current = '';
+      setPayError(apiErrorMessage(reason, 'PayPal checkout could not be started.'));
+    } finally {
+      setPayBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -149,7 +196,28 @@ export default function CustomerOrderDetailPage() {
             {paid && order.paidAt && (
               <p className="mt-1 text-xs text-slate-500">Paid {formatDateTime(order.paidAt)}</p>
             )}
-            <p className="mt-2 text-sm leading-6 text-slate-500">
+            {payError && (
+              <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                {payError}
+              </p>
+            )}
+            {payEligible && (
+              <button
+                type="button"
+                disabled={payBusy}
+                onClick={() => void payWithPayPal()}
+                className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-50"
+              >
+                {payBusy ? <LoaderCircle size={16} className="animate-spin" /> : <ExternalLink size={16} />}
+                {payBusy ? 'Opening PayPal…' : 'Pay with PayPal'}
+              </button>
+            )}
+            {payAtClaimWaiting && (
+              <p className="mt-3 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600">
+                Online payment (PayPal) will be available once your order is Ready for pickup.
+              </p>
+            )}
+            <p className="mt-3 text-sm leading-6 text-slate-500">
               For updates about this order, contact {order.shopName || 'the laundry shop'} directly.
             </p>
           </aside>

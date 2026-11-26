@@ -446,6 +446,98 @@ class ShopOrderPricingServiceTest {
         assertEquals("PAYMONGO", detail.invoice().paymentMethod());
     }
 
+    @Test
+    void customerPaysOwnOrderWithPayPalAndCannotPayAnotherCustomersOrder() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("customerUserId")).thenReturn("customer-1");
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.createOrder(new BigDecimal("123.45"), "order-A", "O-000001"))
+                .thenReturn(new PayPalGateway.CreatedOrder("PP-CUST-10", "https://www.sandbox.paypal.com/checkoutnow?token=PP-CUST-10",
+                        new BigDecimal("123.45"), "PHP"));
+
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+        FirebasePrincipal ownerCustomer = f.customer("customer-1");
+        FirebasePrincipal otherCustomer = f.customer("customer-2");
+
+        ResponseStatusException forbidden = assertThrows(ResponseStatusException.class,
+                () -> service.createCustomerPayPalOrder(otherCustomer, "order-A", null));
+        assertEquals(HttpStatus.NOT_FOUND, forbidden.getStatusCode());
+        verify(gateway, never()).createOrder(any(), any(), any());
+
+        ShopOrderService.PayPalOrderResult created = service.createCustomerPayPalOrder(ownerCustomer, "order-A", null);
+        assertEquals("PP-CUST-10", created.paypalOrderId());
+        assertEquals("PENDING", created.order().paymentStatus());
+
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-CUST-10");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        when(f.orderSnapshot.getString("paymentRecordId")).thenReturn("payment-doc-A");
+        when(gateway.captureOrder("PP-CUST-10"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-CUST-10", "COMPLETED", new BigDecimal("123.45"), "PHP", "CAP-CUST"));
+
+        assertThrows(ResponseStatusException.class,
+                () -> service.captureCustomerPayPalOrder(otherCustomer, "order-A",
+                        new ShopOrderService.PayPalCaptureRequest("PP-CUST-10")));
+
+        ShopOrderService.OrderSummary paid = service.captureCustomerPayPalOrder(
+                ownerCustomer, "order-A", new ShopOrderService.PayPalCaptureRequest("PP-CUST-10"));
+        assertEquals("PAID", paid.paymentStatus());
+        assertEquals("PAYPAL", paid.paymentMethod());
+    }
+
+    @Test
+    void pendingPayPalOrderIsReusedAcrossStaffCustomerAndPublicUntilExpired() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("customerUserId")).thenReturn("customer-1");
+        when(f.orderSnapshot.getString("paymentMethodPreference")).thenReturn("ONLINE");
+        when(f.orderSnapshot.getString("paymentTiming")).thenReturn("PAY_NOW");
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-SHARED-1");
+        when(f.orderSnapshot.getString("paymentLinkId")).thenReturn("PP-SHARED-1");
+        when(f.orderSnapshot.getString("paymentLinkUrl")).thenReturn("https://www.sandbox.paypal.com/checkoutnow?token=PP-SHARED-1");
+        when(f.orderSnapshot.get("paypalOrderExpiresAt")).thenReturn(java.util.Date.from(java.time.Instant.now().plusSeconds(3600)));
+
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.getOrderStatus("PP-SHARED-1")).thenReturn("CREATED");
+        ShopOrderService service = new ShopOrderService(f.firebase, gateway);
+
+        assertEquals("PP-SHARED-1", service.createPayPalOrder(f.staff(), "order-A").paypalOrderId());
+        assertEquals("PP-SHARED-1", service.createCustomerPayPalOrder(f.customer("customer-1"), "order-A", null).paypalOrderId());
+        assertEquals("PP-SHARED-1", service.createPublicPayPalOrder("order-A", null).paypalOrderId());
+        verify(gateway, never()).createOrder(any(), any(), any());
+
+        // When PayPal reports VOIDED (cancelled/expired), a new PayPal order is created
+        when(gateway.getOrderStatus("PP-SHARED-1")).thenReturn("VOIDED");
+        when(gateway.createOrder(new BigDecimal("123.45"), "order-A", "O-000001"))
+                .thenReturn(new PayPalGateway.CreatedOrder("PP-FRESH-2", "https://www.sandbox.paypal.com/checkoutnow?token=PP-FRESH-2",
+                        new BigDecimal("123.45"), "PHP"));
+
+        ShopOrderService.PayPalOrderResult refreshed = service.createCustomerPayPalOrder(f.customer("customer-1"), "order-A", null);
+        assertEquals("PP-FRESH-2", refreshed.paypalOrderId());
+        verify(gateway, times(1)).createOrder(new BigDecimal("123.45"), "order-A", "O-000001");
+    }
+
+    @Test
+    void publicCaptureReturnsCurrentStatusWithoutMarkingPaidWhenNotCompleted() throws Exception {
+        Fixture f = new Fixture(); f.prepareExistingOrder("shop-A"); f.transactionHarness();
+        when(f.orderSnapshot.getString("paymentStatus")).thenReturn("PENDING");
+        when(f.orderSnapshot.getString("paymentMethod")).thenReturn("PAYPAL");
+        when(f.orderSnapshot.getString("paypalOrderId")).thenReturn("PP-WALK-1");
+        when(f.orderSnapshot.getLong("paymentAmountCentavos")).thenReturn(12345L);
+        PayPalGateway gateway = mock(PayPalGateway.class);
+        when(gateway.captureOrder("PP-WALK-1"))
+                .thenReturn(new PayPalGateway.CapturedOrder("PP-WALK-1", "APPROVED", new BigDecimal("123.45"), "PHP", ""));
+
+        ShopOrderService.OrderSummary result = new ShopOrderService(f.firebase, gateway)
+                .capturePublicPayPalOrder("order-A", new ShopOrderService.PayPalCaptureRequest("PP-WALK-1"));
+        assertEquals("PENDING", result.paymentStatus());
+        verify(f.tx, never()).update(any(DocumentReference.class), any(Map.class));
+    }
+
     private static final class Fixture {
         final FirebaseAdminTokenVerifier firebase = mock(FirebaseAdminTokenVerifier.class);
         final Firestore db = mock(Firestore.class);
@@ -545,5 +637,6 @@ class ShopOrderPricingServiceTest {
 
         FirebasePrincipal staff() { return new FirebasePrincipal("staff-uid", "staff@example.com", "Staff Display", "staff-user", "STAFF", "shop-A", "ACTIVE"); }
         FirebasePrincipal owner() { return new FirebasePrincipal("owner-uid", "owner@example.com", "Owner", "owner-user", "OWNER", "shop-A", "ACTIVE"); }
+        FirebasePrincipal customer(String userId) { return new FirebasePrincipal("cust-uid-" + userId, userId + "@example.com", "Customer", userId, "CUSTOMER", null, null); }
     }
 }

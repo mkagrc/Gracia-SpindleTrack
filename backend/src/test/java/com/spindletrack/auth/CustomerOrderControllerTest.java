@@ -6,6 +6,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -72,7 +74,46 @@ class CustomerOrderControllerTest {
         for (String role : List.of("PLATFORM_ADMIN", "OWNER", "STAFF")) {
             mvc.perform(get("/api/me/orders").with(authentication(auth(role)))).andExpect(status().isForbidden());
             mvc.perform(get("/api/me/orders/order-string-1").with(authentication(auth(role)))).andExpect(status().isForbidden());
+            mvc.perform(post("/api/me/orders/order-string-1/payments/paypal-order").with(authentication(auth(role))))
+                    .andExpect(status().isForbidden());
+            mvc.perform(post("/api/me/orders/order-string-1/payments/paypal-capture").with(authentication(auth(role))))
+                    .andExpect(status().isForbidden());
         }
+    }
+
+    @Test
+    void customerCanCreateAndCapturePayPalPaymentForOwnOrder() throws Exception {
+        ShopOrderService.OrderSummary pending = new ShopOrderService.OrderSummary(
+                "order-string-1", "shop-1", "O-000001", "Customer", "639171234567",
+                "user-string-1", "svc-1", "Wash", new java.math.BigDecimal("2.00"),
+                new java.math.BigDecimal("100.00"), "", LaundryStage.RECEIVED, java.time.Instant.now(),
+                "staff-1", "PENDING", "PAYPAL", null, null, null, "PP-CUST-1",
+                "https://www.sandbox.paypal.com/checkoutnow?token=PP-CUST-1", 10000L, "order-string-1");
+        ShopOrderService.OrderSummary paid = new ShopOrderService.OrderSummary(
+                "order-string-1", "shop-1", "O-000001", "Customer", "639171234567",
+                "user-string-1", "svc-1", "Wash", new java.math.BigDecimal("2.00"),
+                new java.math.BigDecimal("100.00"), "", LaundryStage.RECEIVED, java.time.Instant.now(),
+                "staff-1", "PAID", "PAYPAL", java.time.Instant.now(), "PAYPAL", "PayPal Sandbox");
+        when(orders.createCustomerPayPalOrder(any(), eq("order-string-1"), any()))
+                .thenReturn(new ShopOrderService.PayPalOrderResult(pending, "PP-CUST-1",
+                        "https://www.sandbox.paypal.com/checkoutnow?token=PP-CUST-1"));
+        when(orders.captureCustomerPayPalOrder(any(), eq("order-string-1"), any()))
+                .thenReturn(paid);
+
+        mvc.perform(post("/api/me/orders/order-string-1/payments/paypal-order")
+                        .with(authentication(auth("CUSTOMER")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clientRequestId\":\"00000000-0000-4000-8000-000000000001\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paypalOrderId").value("PP-CUST-1"))
+                .andExpect(jsonPath("$.approvalUrl").value("https://www.sandbox.paypal.com/checkoutnow?token=PP-CUST-1"));
+
+        mvc.perform(post("/api/me/orders/order-string-1/payments/paypal-capture")
+                        .with(authentication(auth("CUSTOMER")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"paypalOrderId\":\"PP-CUST-1\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paymentStatus").value("PAID"));
     }
 
     private static UsernamePasswordAuthenticationToken auth(String role) {

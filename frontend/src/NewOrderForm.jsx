@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, BadgeCheck, LoaderCircle, Plus, Search, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, BadgeCheck, Check, Copy, ExternalLink, LoaderCircle, Plus, Search, Trash2, X } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import api, { apiErrorMessage } from './api.js';
 import { formatPeso } from './formatters.js';
 import { billingUnit, normalizeBillingType, previewOrderTotal, quantityInputRules } from './orderPricing.js';
@@ -27,6 +28,8 @@ export default function NewOrderForm() {
   const [rows, setRows] = useState([]); const [notes, setNotes] = useState('');
   const [paymentMethodPreference, setPaymentMethodPreference] = useState('CASH'); const [paymentTiming, setPaymentTiming] = useState('PAY_AT_CLAIM');
   const [lookupEmail, setLookupEmail] = useState(''); const [attachedEmail, setAttachedEmail] = useState(''); const [candidate, setCandidate] = useState(null); const [lookupBusy, setLookupBusy] = useState(false); const [lookupError, setLookupError] = useState('');
+  const [createdOrderResult, setCreatedOrderResult] = useState(null);
+  const [copiedLink, setCopiedLink] = useState(false);
   const requestIdentity = useRef({ fingerprint: '', id: '' });
   useEffect(() => {
     let active = true;
@@ -54,12 +57,76 @@ export default function NewOrderForm() {
     const payload = { customerName: customerName.trim(), mobile, serviceId, quantity: rules.fixedQuantity ?? Number(quantity), ...(type === 'PER_LOAD' && actualWeightKg ? { actualWeightKg: Number(actualWeightKg) } : {}), addOns: cleanRows, notes: notes.trim(), paymentMethodPreference, paymentTiming, ...(attachedEmail ? { customerEmail: attachedEmail } : {}) };
     const fingerprint = JSON.stringify(payload);
     if (!requestIdentity.current.id || requestIdentity.current.fingerprint !== fingerprint) requestIdentity.current = { fingerprint, id: createClientRequestId() };
-    try { const { data } = await api.post('/api/shops/orders', { ...payload, clientRequestId: requestIdentity.current.id }); navigate(`/staff/orders/${encodeURIComponent(data.id)}`, { state: { toast: `Order ${data.orderCode} was created.` } }); }
+    try {
+      const { data } = await api.post('/api/shops/orders', { ...payload, clientRequestId: requestIdentity.current.id });
+      if (paymentMethodPreference === 'ONLINE' && paymentTiming === 'PAY_NOW') {
+        let payPalData = null;
+        let payPalError = '';
+        try {
+          const response = await api.post(`/api/shops/orders/${encodeURIComponent(data.id)}/payments/paypal-order`, {
+            clientRequestId: createClientRequestId(),
+          });
+          payPalData = response.data;
+        } catch (payReason) {
+          payPalError = apiErrorMessage(payReason, 'Could not generate PayPal link yet. Open the order details to share the link.');
+        }
+        setCreatedOrderResult({
+          order: payPalData?.order || data,
+          approvalUrl: payPalData?.approvalUrl || payPalData?.paymentLinkUrl || '',
+          payPalError,
+        });
+        return;
+      }
+      navigate(`/staff/orders/${encodeURIComponent(data.id)}`, { state: { toast: `Order ${data.orderCode} was created.` } });
+    }
     catch (reason) { setError(apiErrorMessage(reason, 'The order could not be created.')); }
     finally { setBusy(false); }
   };
+  const resetForAnotherOrder = () => {
+    setCreatedOrderResult(null); setCopiedLink(false); setError('');
+    setCustomerName(''); setMobile(''); setServiceId(''); setQuantity(''); setActualWeightKg('');
+    setRows([]); setNotes(''); setLookupEmail(''); setAttachedEmail(''); setCandidate(null); setLookupError('');
+    requestIdentity.current = { fingerprint: '', id: '' };
+  };
+  const copyApprovalUrl = async (url) => {
+    if (!url || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    } catch { /* clipboard optional */ }
+  };
   if (loading) return <div role="status" className="flex min-h-48 items-center justify-center gap-3 text-sm text-slate-500"><LoaderCircle className="animate-spin text-brand" size={20} />Loading service and add-on catalogs…</div>;
   if (!services.length) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">There are no active services available. Ask the owner to activate a service before creating an order.</div>;
+  if (createdOrderResult) {
+    const created = createdOrderResult.order;
+    const approvalUrl = createdOrderResult.approvalUrl;
+    return <section className="mx-auto max-w-2xl rounded-3xl border border-teal-100 bg-white p-6 shadow-soft sm:p-8">
+      <div className="flex items-center gap-3 text-emerald-700"><BadgeCheck size={26} /><div><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">Order created</p><h2 className="text-2xl font-semibold text-ink">{created.orderCode}</h2></div></div>
+      <div className="mt-4 grid gap-3 rounded-2xl bg-slate-50 p-4 sm:grid-cols-3">
+        <div><p className="text-xs font-semibold uppercase text-slate-400">Customer</p><p className="mt-1 text-sm font-semibold text-ink">{created.customerName}</p></div>
+        <div><p className="text-xs font-semibold uppercase text-slate-400">Payment</p><p className="mt-1 text-sm font-semibold text-ink">Online payment (PayPal)</p></div>
+        <div><p className="text-xs font-semibold uppercase text-slate-400">Total</p><p className="mt-1 text-sm font-semibold text-ink">{formatPeso(created.totalPrice)}</p></div>
+      </div>
+      {approvalUrl ? <div className="mt-5 rounded-2xl border border-sky-200 bg-sky-50/70 p-5">
+        <h3 className="text-base font-semibold text-ink">Share PayPal payment link with customer</h3>
+        <p className="mt-1 text-sm text-slate-600">Ask the customer to scan this QR code or open the link on their own device to pay with PayPal. Once they approve, you can confirm payment from the order page.</p>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <a href={approvalUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand underline">Customer PayPal link <ExternalLink size={14} /></a>
+          <button type="button" onClick={() => void copyApprovalUrl(approvalUrl)} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+            {copiedLink ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}{copiedLink ? 'Copied link' : 'Copy link'}
+          </button>
+        </div>
+        <div className="mt-4 inline-flex rounded-xl border border-slate-200 bg-white p-3"><QRCodeSVG value={approvalUrl} size={160} level="M" /></div>
+      </div> : <div role="alert" className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        {createdOrderResult.payPalError || 'PayPal link is not ready yet. Open the order details to share the PayPal payment link.'}
+      </div>}
+      <div className="mt-6 flex flex-wrap gap-3">
+        <Link to={`/staff/orders/${encodeURIComponent(created.id)}`} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-brand px-5 text-sm font-semibold text-white hover:bg-teal-700">View order details <ArrowRight size={16} /></Link>
+        <button type="button" onClick={resetForAnotherOrder} className="inline-flex min-h-11 items-center rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50">Create another order</button>
+      </div>
+    </section>;
+  }
   return <form onSubmit={submit} className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
     <div className="space-y-5">
       {error && <div role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}

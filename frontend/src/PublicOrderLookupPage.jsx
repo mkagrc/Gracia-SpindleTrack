@@ -1,16 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, LoaderCircle, RefreshCw, Search } from 'lucide-react';
+import { ArrowRight, ExternalLink, LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import api, { apiErrorMessage } from './api.js';
 import { normalizeLookupCode, normalizeLookupMobile } from './publicOrderLookup.js';
 import { clearPublicLookupCredentials, readPublicLookupCredentials, writePublicLookupCredentials } from './publicLookupSession.js';
+import { savePendingPayPalOrder } from './paypalSession.js';
 import OrderStatusTracker, { stageDisplayLabel } from './components/OrderStatusTracker.jsx';
 import OrderQuantityBadge from './components/OrderQuantityBadge.jsx';
-import { normalizePublicOrderLookup } from './orderPageData.js';
+import { isPayPalCheckoutEligible, normalizePublicOrderLookup } from './orderPageData.js';
 
 function sessionStorageOrNull() {
   try { return typeof window === 'undefined' ? null : window.sessionStorage; }
   catch { return null; }
+}
+
+function createClientRequestId(cryptoSource = globalThis.crypto) {
+  if (cryptoSource?.randomUUID) return cryptoSource.randomUUID();
+  if (!cryptoSource?.getRandomValues) throw new Error('Secure UUID generation is unavailable.');
+  const bytes = cryptoSource.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export default function PublicOrderLookupPage() {
@@ -18,8 +29,11 @@ export default function PublicOrderLookupPage() {
   const [mobile, setMobile] = useState(() => readPublicLookupCredentials(sessionStorageOrNull())?.mobile || '');
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [payBusy, setPayBusy] = useState(false);
+  const [payError, setPayError] = useState('');
   const [error, setError] = useState('');
   const inFlight = useRef(false);
+  const payRequestIdRef = useRef('');
 
   const lookup = async (code, phone, persist = true) => {
     if (inFlight.current) return;
@@ -58,7 +72,46 @@ export default function PublicOrderLookupPage() {
   }, []);
 
   const submit = (event) => { event.preventDefault(); void lookup(orderCode, mobile); };
-  const trackAnother = () => { clearPublicLookupCredentials(sessionStorageOrNull()); setResult(null); setError(''); setOrderCode(''); setMobile(''); };
+  const trackAnother = () => { clearPublicLookupCredentials(sessionStorageOrNull()); setResult(null); setError(''); setPayError(''); setOrderCode(''); setMobile(''); };
+  const payEligible = isPayPalCheckoutEligible(result);
+  const payAtClaimWaiting = result && result.paymentStatus !== 'PAID'
+    && result.paymentMethodPreference === 'ONLINE'
+    && result.paymentTiming === 'PAY_AT_CLAIM'
+    && result.currentStage !== 'READY'
+    && result.currentStage !== 'CLAIMED';
+
+  const payWithPayPal = async () => {
+    const cleanCode = normalizeLookupCode(orderCode);
+    const cleanMobile = normalizeLookupMobile(mobile);
+    if (!cleanCode || !cleanMobile) return;
+    setPayBusy(true);
+    setPayError('');
+    try {
+      if (!payRequestIdRef.current) payRequestIdRef.current = createClientRequestId();
+      writePublicLookupCredentials(sessionStorageOrNull(), { orderCode: String(orderCode).trim(), mobile: String(mobile).trim() });
+      const { data } = await api.post('/api/public/orders/paypal-order', {
+        orderCode: cleanCode,
+        mobile: cleanMobile,
+        clientRequestId: payRequestIdRef.current,
+      });
+      savePendingPayPalOrder(sessionStorageOrNull(), {
+        flow: 'public',
+        orderId: '',
+        orderCode: cleanCode,
+        paypalOrderId: data.paypalOrderId || '',
+      });
+      if (data.approvalUrl && typeof window !== 'undefined') {
+        window.location.assign(data.approvalUrl);
+        return;
+      }
+      setPayError('PayPal checkout link is unavailable. Please try again.');
+    } catch (reason) {
+      payRequestIdRef.current = '';
+      setPayError(apiErrorMessage(reason, 'PayPal checkout could not be started.'));
+    } finally {
+      setPayBusy(false);
+    }
+  };
 
   return <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col bg-slate-50 px-5 py-10 text-slate-900 sm:px-8 sm:py-14">
     <div className="w-full flex-1">
@@ -72,7 +125,7 @@ export default function PublicOrderLookupPage() {
         <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Order code</p><h2 className="mt-1 text-2xl font-semibold">{result.orderCode}</h2><p className="mt-1 text-sm text-slate-500">Mobile ending {String(result.maskedMobile || '').slice(-4)}</p></div><span className="rounded-full bg-teal-50 px-3 py-1.5 text-sm font-semibold text-teal-800">{stageDisplayLabel(result.currentStage)}</span></div>
         <div className="mt-5 rounded-xl bg-slate-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Quantity</p><div className="mt-1 text-sm font-semibold"><OrderQuantityBadge order={result} showActualWeight={false} /></div></div>
         <div className="mt-6"><h3 className="mb-3 text-sm font-semibold">Order status</h3><OrderStatusTracker stageHistory={result.stageHistory || []} currentStage={result.currentStage} showStaffName={false} /></div>
-        <div className="mt-6 border-t border-slate-100 pt-5"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Payment status</h3><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${result.paymentStatus === 'PAID' ? 'bg-emerald-50 text-emerald-800' : result.paymentStatus === 'PENDING' ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-700'}`}>{result.paymentStatus === 'PAID' ? 'Paid' : result.paymentStatus === 'PENDING' ? 'Pending online' : 'Unpaid'}</span></div></div>
+        <div className="mt-6 border-t border-slate-100 pt-5"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Payment status</h3><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${result.paymentStatus === 'PAID' ? 'bg-emerald-50 text-emerald-800' : result.paymentStatus === 'PENDING' ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-700'}`}>{result.paymentStatus === 'PAID' ? 'Paid' : result.paymentStatus === 'PENDING' ? 'Pending online' : 'Unpaid'}</span></div>{payError && <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{payError}</p>}{payEligible && <div className="mt-4"><button type="button" disabled={payBusy} onClick={() => void payWithPayPal()} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-teal-600 px-5 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-50">{payBusy ? <LoaderCircle size={16} className="animate-spin" /> : <ExternalLink size={16} />}{payBusy ? 'Opening PayPal…' : 'Pay with PayPal'}</button></div>}{payAtClaimWaiting && <p className="mt-3 text-xs text-slate-500">Online payment (PayPal) will be available here when your order is Ready for pickup.</p>}</div>
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4"><p className="text-xs text-slate-400">Auto-refreshes every 30 seconds while this tab is visible.</p><div className="flex flex-wrap gap-2"><button type="button" disabled={busy} onClick={() => void lookup(orderCode, mobile)} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50"><RefreshCw size={15} className={busy ? 'animate-spin' : ''} />Refresh status</button><button type="button" disabled={busy} onClick={trackAnother} className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50">Track another order</button></div></div>
       </section>}
       <p className="mt-6 text-xs leading-5 text-slate-400">For privacy, the lookup does not display your name, full mobile number, shop details, notes, or order price. Lookup details stay in this tab session only. Need help? Contact the laundry shop.</p>

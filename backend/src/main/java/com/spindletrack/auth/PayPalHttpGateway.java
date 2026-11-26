@@ -2,6 +2,7 @@ package com.spindletrack.auth;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -10,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -29,14 +32,20 @@ import org.springframework.web.util.UriComponentsBuilder;
 @Component
 public class PayPalHttpGateway implements PayPalGateway {
 
+    private static final Logger log = LoggerFactory.getLogger(PayPalHttpGateway.class);
     private static final Pattern SAFE_PAYPAL_ID = Pattern.compile("[A-Za-z0-9_-]{5,100}");
-    private static final String DEFAULT_BASE_URL = "https://api-m.sandbox.paypal.com";
+    static final String DEFAULT_BASE_URL = "https://api-m.sandbox.paypal.com";
+    static final String DEFAULT_RETURN_URL = "http://localhost:5173/paypal/return";
+    static final String DEFAULT_CANCEL_URL = "http://localhost:5173/paypal/cancel";
+    static final String INVALID_BASE_URL_MESSAGE =
+            "PAYPAL_BASE_URL must be a valid https URL, for example https://api-m.sandbox.paypal.com";
 
     private final String clientId;
     private final String clientSecret;
     private final String returnUrl;
     private final String cancelUrl;
     private final RestClient restClient;
+    private final String configurationError;
 
     private volatile CachedToken cachedToken;
 
@@ -51,16 +60,31 @@ public class PayPalHttpGateway implements PayPalGateway {
             @Value("${paypal.client-id:}") String clientId,
             @Value("${paypal.client-secret:}") String clientSecret,
             @Value("${paypal.base-url:" + DEFAULT_BASE_URL + "}") String baseUrl,
-            @Value("${paypal.return-url:http://localhost:5173/paypal/return}") String returnUrl,
-            @Value("${paypal.cancel-url:http://localhost:5173/paypal/cancel}") String cancelUrl) {
-        this(
-                clientId,
-                clientSecret,
-                returnUrl,
-                cancelUrl,
-                RestClient.builder()
-                        .baseUrl(normalizeBaseUrl(baseUrl))
-                        .build());
+            @Value("${paypal.return-url:" + DEFAULT_RETURN_URL + "}") String returnUrl,
+            @Value("${paypal.cancel-url:" + DEFAULT_CANCEL_URL + "}") String cancelUrl) {
+        this.clientId = stripQuotesAndTrim(clientId);
+        this.clientSecret = stripQuotesAndTrim(clientSecret);
+        String resolvedReturnUrl = DEFAULT_RETURN_URL;
+        String resolvedCancelUrl = DEFAULT_CANCEL_URL;
+        RestClient client = null;
+        String error = null;
+        try {
+            String normalizedBaseUrl = normalizeAndValidateBaseUrl(baseUrl);
+            resolvedReturnUrl = normalizeAndValidateCallbackUrl(returnUrl, DEFAULT_RETURN_URL, "PAYPAL_RETURN_URL");
+            resolvedCancelUrl = normalizeAndValidateCallbackUrl(cancelUrl, DEFAULT_CANCEL_URL, "PAYPAL_CANCEL_URL");
+            client = RestClient.builder()
+                    .baseUrl(normalizedBaseUrl)
+                    .build();
+        } catch (RuntimeException ex) {
+            error = ex instanceof IllegalArgumentException && ex.getMessage() != null && !ex.getMessage().isBlank()
+                    ? ex.getMessage()
+                    : INVALID_BASE_URL_MESSAGE;
+            log.warn("PayPal configuration is invalid: {}. PayPal endpoints will return 503 until fixed.", error);
+        }
+        this.returnUrl = resolvedReturnUrl;
+        this.cancelUrl = resolvedCancelUrl;
+        this.restClient = client;
+        this.configurationError = error;
     }
 
     PayPalHttpGateway(
@@ -69,11 +93,14 @@ public class PayPalHttpGateway implements PayPalGateway {
             String returnUrl,
             String cancelUrl,
             RestClient restClient) {
-        this.clientId = clientId == null ? "" : clientId.trim();
-        this.clientSecret = clientSecret == null ? "" : clientSecret.trim();
-        this.returnUrl = returnUrl == null || returnUrl.isBlank() ? "http://localhost:5173/paypal/return" : returnUrl.trim();
-        this.cancelUrl = cancelUrl == null || cancelUrl.isBlank() ? "http://localhost:5173/paypal/cancel" : cancelUrl.trim();
+        this.clientId = stripQuotesAndTrim(clientId);
+        this.clientSecret = stripQuotesAndTrim(clientSecret);
+        String cleanedReturn = stripQuotesAndTrim(returnUrl);
+        String cleanedCancel = stripQuotesAndTrim(cancelUrl);
+        this.returnUrl = cleanedReturn.isBlank() ? DEFAULT_RETURN_URL : cleanedReturn;
+        this.cancelUrl = cleanedCancel.isBlank() ? DEFAULT_CANCEL_URL : cleanedCancel;
         this.restClient = restClient;
+        this.configurationError = null;
     }
 
     @Override
@@ -174,6 +201,29 @@ public class PayPalHttpGateway implements PayPalGateway {
         }
     }
 
+    @Override
+    public String getOrderStatus(String paypalOrderId) {
+        requireCredentials();
+        String safeId = safeOrderId(paypalOrderId);
+        String token = accessToken();
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restClient.get()
+                    .uri("/v2/checkout/orders/{id}", safeId)
+                    .header("Authorization", "Bearer " + token)
+                    .retrieve()
+                    .body(Map.class);
+            return response == null ? "" : text(response.get("status")).toUpperCase(java.util.Locale.ROOT);
+        } catch (RestClientResponseException ex) {
+            if (ex.getStatusCode() == HttpStatus.NOT_FOUND || ex.getStatusCode() == HttpStatus.GONE) {
+                return "EXPIRED";
+            }
+            return "";
+        } catch (Exception ex) {
+            return "";
+        }
+    }
+
     private synchronized String accessToken() {
         CachedToken current = cachedToken;
         if (current != null && current.isValid()) {
@@ -210,16 +260,85 @@ public class PayPalHttpGateway implements PayPalGateway {
     }
 
     private void requireCredentials() {
+        if (configurationError != null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, configurationError);
+        }
+        if (restClient == null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, INVALID_BASE_URL_MESSAGE);
+        }
         if (clientId.isBlank() || clientSecret.isBlank()) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "PayPal Sandbox is not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.");
         }
     }
 
-    private static String normalizeBaseUrl(String baseUrl) {
-        if (baseUrl == null || baseUrl.isBlank()) return DEFAULT_BASE_URL;
-        String trimmed = baseUrl.trim();
-        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+    static String stripQuotesAndTrim(String value) {
+        if (value == null) return "";
+        String current = value.trim();
+        while (current.length() >= 2) {
+            char first = current.charAt(0);
+            char last = current.charAt(current.length() - 1);
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                current = current.substring(1, current.length() - 1).trim();
+            } else {
+                break;
+            }
+        }
+        return current;
+    }
+
+    static String normalizeAndValidateBaseUrl(String baseUrl) {
+        String cleaned = stripQuotesAndTrim(baseUrl);
+        if (cleaned.isBlank()) {
+            return DEFAULT_BASE_URL;
+        }
+        while (cleaned.endsWith("/")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        }
+        if (cleaned.isBlank()) {
+            throw new IllegalArgumentException(INVALID_BASE_URL_MESSAGE);
+        }
+        try {
+            URI uri = URI.create(cleaned);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null
+                    || !"https".equalsIgnoreCase(scheme)
+                    || host == null
+                    || host.isBlank()
+                    || uri.getUserInfo() != null
+                    || uri.getQuery() != null
+                    || uri.getFragment() != null) {
+                throw new IllegalArgumentException(INVALID_BASE_URL_MESSAGE);
+            }
+            RestClient.builder().baseUrl(cleaned);
+            return cleaned;
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException(INVALID_BASE_URL_MESSAGE);
+        }
+    }
+
+    static String normalizeAndValidateCallbackUrl(String rawUrl, String fallback, String envName) {
+        String cleaned = stripQuotesAndTrim(rawUrl);
+        if (cleaned.isBlank()) {
+            return fallback;
+        }
+        try {
+            URI uri = URI.create(cleaned);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null
+                    || (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))
+                    || host == null
+                    || host.isBlank()
+                    || uri.getUserInfo() != null) {
+                throw new IllegalArgumentException(envName + " must be a valid http or https URL.");
+            }
+            UriComponentsBuilder.fromUriString(cleaned).build(true);
+            return cleaned;
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException(envName + " must be a valid http or https URL.");
+        }
     }
 
     private static String withOrderId(String baseReturnOrCancelUrl, String orderId) {

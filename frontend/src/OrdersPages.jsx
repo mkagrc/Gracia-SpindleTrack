@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, BadgeCheck, ClipboardList, Clock3, Droplets, ExternalLink, LoaderCircle, Package, Plus, RefreshCw, Search, Store } from 'lucide-react';
+import { ArrowLeft, ArrowRight, BadgeCheck, Check, ClipboardList, Clock3, Copy, Droplets, ExternalLink, LoaderCircle, Package, Plus, RefreshCw, Search, Store } from 'lucide-react';
 import api, { apiErrorMessage } from './api.js';
 import ConfirmDialog from './ConfirmDialog.jsx';
 import Toast from './Toast.jsx';
 import OrderStatusTracker, { stageDisplayLabel } from './components/OrderStatusTracker.jsx';
 import OrderQuantityBadge from './components/OrderQuantityBadge.jsx';
-import { normalizeOrderDetailResponse, normalizePagedRows } from './orderPageData.js';
+import { isPayPalCheckoutEligible, normalizeOrderDetailResponse, normalizePagedRows } from './orderPageData.js';
 import { formatDateTime, formatOrderPaymentMethod, formatPaymentMethod, formatPeso } from './formatters.js';
 import { savePendingPayPalOrder } from './paypalSession.js';
 import { QRCodeSVG } from 'qrcode.react';
@@ -65,20 +65,34 @@ function CustomerStageProgress({ stage }) {
   </ol>;
 }
 
-function CustomerOrderCard({ order }) {
-  return <Link to={`/customer/orders/${encodeURIComponent(order.id)}`} className="group block rounded-2xl border border-slate-200 bg-white p-4 transition hover:-translate-y-0.5 hover:border-teal-200 hover:shadow-soft focus:outline-none focus:ring-4 focus:ring-teal-100 sm:p-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-slate-400">{order.orderCode}</p><h3 className="mt-1 truncate text-base font-semibold text-ink">{order.shopName || 'Laundry shop'}</h3><p className="mt-1 text-xs text-slate-500">{dateTime(order.createdAt)}</p></div>
-      <div className="flex flex-wrap gap-2"><StagePill stage={order.stage} /><PaymentPill status={order.paymentStatus} /></div>
+function CustomerOrderCard({ order, onPayWithPayPal, payingOrderId }) {
+  const payEligible = isPayPalCheckoutEligible(order);
+  const paying = payingOrderId === order.id;
+  return <article className="rounded-2xl border border-slate-200 bg-white p-4 transition hover:border-teal-200 hover:shadow-soft sm:p-5">
+    <Link to={`/customer/orders/${encodeURIComponent(order.id)}`} className="group block focus:outline-none">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-slate-400">{order.orderCode}</p><h3 className="mt-1 truncate text-base font-semibold text-ink">{order.shopName || 'Laundry shop'}</h3><p className="mt-1 text-xs text-slate-500">{dateTime(order.createdAt)}</p></div>
+        <div className="flex flex-wrap gap-2"><StagePill stage={order.stage} /><PaymentPill status={order.paymentStatus} /></div>
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-3 rounded-xl bg-slate-50 p-3">
+        <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Service</p><p className="mt-1 truncate text-sm font-medium text-ink">{order.serviceName || 'Laundry service'}</p></div>
+        <div><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Quantity</p><div className="mt-1 text-sm font-medium text-ink"><OrderQuantityBadge order={order} /></div></div>
+        <div><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Total</p><p className="mt-1 text-sm font-semibold text-ink">{money(order.totalPrice)}</p></div>
+      </div>
+      <div className="mt-4"><div className="mb-2 flex items-center justify-between gap-2"><p className="text-xs font-semibold text-slate-600">Laundry progress</p><p className="text-xs font-semibold text-teal-800">{stageName(order.stage)}</p></div><CustomerStageProgress stage={order.stage} /></div>
+    </Link>
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
+      <div>
+        {payEligible && (
+          <button type="button" disabled={Boolean(payingOrderId)} onClick={() => onPayWithPayPal?.(order)} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-brand px-3.5 text-xs font-semibold text-white hover:bg-teal-700 disabled:opacity-50">
+            {paying ? <LoaderCircle size={14} className="animate-spin" /> : <ExternalLink size={14} />}
+            {paying ? 'Opening PayPal\u2026' : 'Pay with PayPal'}
+          </button>
+        )}
+      </div>
+      <Link to={`/customer/orders/${encodeURIComponent(order.id)}`} className="inline-flex items-center gap-1 text-xs font-semibold text-brand hover:text-teal-800">View order details <ArrowRight size={14} /></Link>
     </div>
-    <div className="mt-4 grid grid-cols-3 gap-3 rounded-xl bg-slate-50 p-3">
-      <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Service</p><p className="mt-1 truncate text-sm font-medium text-ink">{order.serviceName || 'Laundry service'}</p></div>
-      <div><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Quantity</p><div className="mt-1 text-sm font-medium text-ink"><OrderQuantityBadge order={order} /></div></div>
-      <div><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Total</p><p className="mt-1 text-sm font-semibold text-ink">{money(order.totalPrice)}</p></div>
-    </div>
-    <div className="mt-4"><div className="mb-2 flex items-center justify-between gap-2"><p className="text-xs font-semibold text-slate-600">Laundry progress</p><p className="text-xs font-semibold text-teal-800">{stageName(order.stage)}</p></div><CustomerStageProgress stage={order.stage} /></div>
-    <div className="mt-4 flex items-center justify-end gap-1 border-t border-slate-100 pt-3 text-xs font-semibold text-brand">View order details <ArrowRight size={14} className="transition group-hover:translate-x-0.5" /></div>
-  </Link>;
+  </article>;
 }
 
 export function OrdersListPage({ readOnly = false }) {
@@ -105,6 +119,7 @@ export function OrderDetailPage({ readOnly = false }) {
   const { orderId } = useParams(); const location = useLocation();
   const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [reload, setReload] = useState(0);
   const [dialog, setDialog] = useState(false); const [cashDialog, setCashDialog] = useState(false); const [cancelLinkDialog, setCancelLinkDialog] = useState(false); const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState(location?.state?.toast ? { type: 'success', message: location.state.toast } : null);
   const stageRequestIds = useRef(new Map()); const linkRequestIds = useRef(new Map()); const base = readOnly ? '/owner/orders' : '/staff/orders';
   useEffect(() => { let active = true; setLoading(true); setError('');
@@ -127,27 +142,31 @@ export function OrderDetailPage({ readOnly = false }) {
     } catch (reason) { throw new Error(apiErrorMessage(reason)); } finally { setBusy(false); }
   };
   const recordCashPayment = async () => { setBusy(true); try { const { data } = await api.post(`/api/shops/orders/${encodeURIComponent(orderId)}/payments/cash`); setCashDialog(false); setToast({ type: 'success', message: `Cash payment recorded for ${data.orderCode}.` }); setReload((n) => n + 1); } catch (reason) { throw new Error(apiErrorMessage(reason)); } finally { setBusy(false); } };
-  const createPayPalOrder = async () => {
+  const sharePayPalLink = async () => {
     setBusy(true);
     const key = `${orderId}:${order?.totalPrice}:${paymentTiming}`;
     try {
       let clientRequestId = linkRequestIds.current.get(key);
       if (!clientRequestId) { clientRequestId = createClientRequestId(); linkRequestIds.current.set(key, clientRequestId); }
       const { data } = await api.post(`/api/shops/orders/${encodeURIComponent(orderId)}/payments/paypal-order`, { clientRequestId });
-      const approvalUrl = data.approvalUrl || data.paymentLinkUrl;
-      const paypalOrderId = data.paypalOrderId || data.paymentLinkId;
-      savePendingPayPalOrder(typeof window !== 'undefined' ? window.sessionStorage : null, { orderId, paypalOrderId });
-      if (approvalUrl && typeof window !== 'undefined') {
-        window.location.assign(approvalUrl);
-        return;
-      }
-      setToast({ type: 'success', message: `PayPal order ready for ${data.order?.orderCode || order?.orderCode}.` });
+      setToast({ type: 'success', message: `PayPal payment link is ready to share for ${data.order?.orderCode || order?.orderCode}.` });
       setReload((n) => n + 1);
     } catch (reason) {
       linkRequestIds.current.delete(key);
-      setToast({ type: 'error', message: apiErrorMessage(reason, 'PayPal order could not be created.') });
+      setToast({ type: 'error', message: apiErrorMessage(reason, 'PayPal payment link could not be created.') });
     }
     finally { setBusy(false); }
+  };
+  const copyPayPalLink = async (url) => {
+    if (!url || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setToast({ type: 'success', message: 'PayPal payment link copied.' });
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setToast({ type: 'error', message: 'Could not copy link. Copy it from the link below.' });
+    }
   };
   const capturePayPalPayment = async () => {
     setBusy(true);
@@ -168,8 +187,8 @@ export function OrderDetailPage({ readOnly = false }) {
         <section className="rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-7">
           <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-wide text-slate-400">Customer</p><h2 className="mt-1 text-xl font-semibold text-ink">{order.customerName || 'Customer'}</h2><p className="mt-1 text-sm text-slate-500">{order.mobile || '\u2014'}</p></div><div className="flex flex-wrap gap-2"><StagePill stage={order.stage} /><PaymentPill status={order.paymentStatus} /></div></div>
           <div className="mt-5 grid gap-4 rounded-2xl bg-slate-50 p-4 sm:grid-cols-3"><div><p className="text-xs font-semibold uppercase text-slate-400">Service</p><p className="mt-1 font-semibold">{order.serviceName || '\u2014'}</p></div><div><p className="text-xs font-semibold uppercase text-slate-400">{weightLabel(order.unit)}</p><div className="mt-1 font-semibold"><OrderQuantityBadge order={order} /></div></div><div><p className="text-xs font-semibold uppercase text-slate-400">Total price</p><p className="mt-1 text-lg font-semibold">{money(order.totalPrice)}</p></div></div>
-          <div className="mt-4 rounded-2xl border border-slate-100 p-4"><p className="text-xs font-semibold uppercase text-slate-400">Payment</p><p className="mt-1 text-sm font-medium">{paid ? `Paid by ${order.paymentMethod ? formatOrderPaymentMethod(order) : '\u2014'}` : pendingPayment ? (order?.paymentMethod === 'PAYMONGO' ? 'Legacy PayMongo link pending' : 'PayPal payment pending') : 'Payment due'}</p><div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500"><span>Chosen method: {paymentMethodPreference === 'ONLINE' ? 'Online payment (PayPal)' : paymentMethodPreference === 'CASH' ? 'Cash' : 'Not specified (both available)'}</span><span>Timing: {paymentTiming === 'PAY_AT_CLAIM' ? 'Pay when claiming the laundry' : 'Pay now'}</span></div>
-            {pendingPayment && <><p className="mt-2 text-xs text-slate-500">{order?.paymentMethod === 'PAYMONGO' ? 'Legacy PayMongo link' : 'Awaiting PayPal Sandbox approval'} for {money(Number(order.paymentAmountCentavos || 0) / 100)}.</p>{order.paymentLinkUrl && order?.paymentMethod !== 'PAYMONGO' && <><div className="mt-2 flex flex-wrap gap-3"><a className="inline-flex items-center gap-1 text-sm font-semibold text-brand underline" href={order.paymentLinkUrl} target="_blank" rel="noopener noreferrer">Open PayPal approval page <ExternalLink size={14} /></a></div><div className="mt-3 inline-flex rounded-xl border border-slate-100 bg-white p-3"><QRCodeSVG value={order.paymentLinkUrl} size={144} level="M" /></div></>}</>}
+          <div className="mt-4 rounded-2xl border border-slate-100 p-4"><p className="text-xs font-semibold uppercase text-slate-400">Payment</p><p className="mt-1 text-sm font-medium">{paid ? `Paid by ${order.paymentMethod ? formatOrderPaymentMethod(order) : '\u2014'}` : pendingPayment ? (order?.paymentMethod === 'PAYMONGO' ? 'Legacy PayMongo link pending' : 'PayPal payment pending (waiting for customer)') : 'Payment due'}</p><div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500"><span>Chosen method: {paymentMethodPreference === 'ONLINE' ? 'Online payment (PayPal)' : paymentMethodPreference === 'CASH' ? 'Cash' : 'Not specified (both available)'}</span><span>Timing: {paymentTiming === 'PAY_AT_CLAIM' ? 'Pay when claiming the laundry' : 'Pay now'}</span></div>
+            {pendingPayment && <><p className="mt-2 text-xs text-slate-500">{order?.paymentMethod === 'PAYMONGO' ? 'Legacy PayMongo link' : 'Share this link or QR code with the customer to pay'} {money(Number(order.paymentAmountCentavos || 0) / 100)}.</p>{order.paymentLinkUrl && order?.paymentMethod !== 'PAYMONGO' && <><div className="mt-2 flex flex-wrap items-center gap-3"><a className="inline-flex items-center gap-1 text-sm font-semibold text-brand underline" href={order.paymentLinkUrl} target="_blank" rel="noopener noreferrer">Customer PayPal link <ExternalLink size={14} /></a><button type="button" onClick={() => void copyPayPalLink(order.paymentLinkUrl)} className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">{copied ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}{copied ? 'Copied' : 'Copy link'}</button></div><div className="mt-3 inline-flex rounded-xl border border-slate-100 bg-white p-3"><QRCodeSVG value={order.paymentLinkUrl} size={144} level="M" /></div></>}</>}
             {paid && <><p className="mt-2 text-xs text-slate-500">Paid {dateTime(order.paidAt)}</p>{order.paidByName && <p className="mt-1 text-xs text-slate-500">Recorded by {order.paidByName}</p>}</>}
           </div>
           {order.notes && <div className="mt-5 rounded-2xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase text-slate-400">Notes</p><p className="mt-1 whitespace-pre-wrap text-sm">{order.notes}</p></div>}
@@ -181,7 +200,7 @@ export function OrderDetailPage({ readOnly = false }) {
       </div>
       <aside className="h-fit rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-6"><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Current stage</p><p className="mt-2 text-xl font-semibold">{stageName(order.stage)}</p>
         {readOnly ? <p className="mt-3 text-sm leading-6 text-slate-500">Owner order access is read-only.</p> : <>
-          {!paid && !pendingPayment && mayRecordPayment && (paymentMethodPreference === 'ONLINE' || paymentMethodPreference === null) && <button type="button" disabled={busy} onClick={createPayPalOrder} className="mt-5 min-h-11 w-full rounded-xl border border-sky-200 bg-sky-50 px-4 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:opacity-50">{busy ? 'Opening PayPal\u2026' : 'Pay with PayPal (Sandbox)'}</button>}
+          {!paid && !pendingPayment && mayRecordPayment && (paymentMethodPreference === 'ONLINE' || paymentMethodPreference === null) && <button type="button" disabled={busy} onClick={sharePayPalLink} className="mt-5 min-h-11 w-full rounded-xl border border-sky-200 bg-sky-50 px-4 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:opacity-50">{busy ? 'Generating link\u2026' : 'Share PayPal payment link'}</button>}
           {!paid && !pendingPayment && mayRecordPayment && (paymentMethodPreference === 'CASH' || paymentMethodPreference === null) && <button type="button" disabled={busy} onClick={() => setCashDialog(true)} className="mt-3 min-h-11 w-full rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50">Record cash payment</button>}
           {pendingPayment && <>{order?.paymentMethod !== 'PAYMONGO' && <button type="button" disabled={busy} onClick={() => { void capturePayPalPayment().catch((reason) => setToast({ type: 'error', message: reason.message })); }} className="mt-3 min-h-11 w-full rounded-xl border border-sky-200 bg-sky-50 px-4 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:opacity-50">{busy ? 'Confirming\u2026' : 'Confirm PayPal payment'}</button>}<button type="button" disabled={busy} onClick={() => setCancelLinkDialog(true)} className="mt-3 min-h-11 w-full rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-800 disabled:opacity-50">Cancel pending payment</button>{(paymentMethodPreference === 'CASH' || paymentMethodPreference === null) && mayRecordPayment && <button type="button" disabled={busy} onClick={() => setCashDialog(true)} className="mt-3 min-h-11 w-full rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-800 disabled:opacity-50">Record cash payment instead</button>}</>}
           {nextStage ? <button type="button" disabled={busy || (nextStage === 'CLAIMED' && !paid)} onClick={() => setDialog(true)} className="mt-3 min-h-11 w-full rounded-xl bg-brand px-4 text-sm font-semibold text-white disabled:opacity-50">{nextStage === 'CLAIMED' && !paid ? 'Payment required before claim' : `Move to ${stageName(nextStage)}`}</button> : <p className="mt-3 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">This order has reached the final stage: Claimed.</p>}
@@ -194,9 +213,38 @@ export function OrderDetailPage({ readOnly = false }) {
   </>;
 }
 export function CustomerOrdersPage({ customerName = '' }) {
-  const [result, setResult] = useState(null); const [page, setPage] = useState(0); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [reload, setReload] = useState(0);
+  const [result, setResult] = useState(null); const [page, setPage] = useState(0); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [payError, setPayError] = useState(''); const [payingOrderId, setPayingOrderId] = useState(''); const [reload, setReload] = useState(0);
+  const payRequestIds = useRef(new Map());
   useEffect(() => { let active = true; setLoading(true); setError(''); api.get('/api/me/orders', { params: { page } }).then(({ data }) => { if (active) setResult(normalizePagedRows(data)); }).catch((reason) => { if (active) setError(apiErrorMessage(reason)); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [page, reload]);
   const rows = Array.isArray(result?.content) ? result.content : []; const total = result?.totalElements ?? 0; const pages = Math.max(1, result?.totalPages || 1); const snapshot = customerOrderSnapshot(rows, total); const firstName = customerName.trim().split(/\s+/)[0] || 'there';
+  const payWithPayPal = async (order) => {
+    if (!order?.id) return;
+    setPayingOrderId(order.id);
+    setPayError('');
+    try {
+      let clientRequestId = payRequestIds.current.get(order.id);
+      if (!clientRequestId) { clientRequestId = createClientRequestId(); payRequestIds.current.set(order.id, clientRequestId); }
+      const { data } = await api.post(`/api/me/orders/${encodeURIComponent(order.id)}/payments/paypal-order`, { clientRequestId });
+      const approvalUrl = data.approvalUrl || data.paymentLinkUrl;
+      const paypalOrderId = data.paypalOrderId || data.paymentLinkId;
+      savePendingPayPalOrder(typeof window !== 'undefined' ? window.sessionStorage : null, {
+        flow: 'customer',
+        orderId: order.id,
+        orderCode: order.orderCode || '',
+        paypalOrderId,
+      });
+      if (approvalUrl && typeof window !== 'undefined') {
+        window.location.assign(approvalUrl);
+        return;
+      }
+      setPayError('PayPal checkout link is unavailable. Please try again.');
+    } catch (reason) {
+      payRequestIds.current.delete(order.id);
+      setPayError(apiErrorMessage(reason, 'PayPal checkout could not be started.'));
+    } finally {
+      setPayingOrderId('');
+    }
+  };
   return <div className="space-y-6">
     <section className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#0F172A] via-[#123A44] to-[#0D9488] px-6 py-7 text-white shadow-soft sm:px-9 sm:py-9">
       <div className="relative z-10 max-w-2xl"><p className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold text-teal-50"><Droplets size={15} /> Customer workspace</p><h1 className="mt-4 text-3xl font-semibold tracking-tight sm:text-4xl">Welcome back, {firstName}.</h1><p className="mt-3 max-w-xl text-sm leading-6 text-teal-50/90 sm:text-base">{'Keep up with the laundry orders linked to your verified account\u2014stage, shop, and payment status in one place.'}</p><Link to="/track-order" className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-slate-900 transition hover:bg-teal-50">Track a walk-in order <ExternalLink size={15} /></Link></div>
@@ -210,9 +258,9 @@ export function CustomerOrdersPage({ customerName = '' }) {
     <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
       <section className="min-w-0 rounded-3xl border border-slate-100 bg-white p-4 shadow-soft sm:p-6">
         <div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">Your laundry</p><h2 className="mt-1 text-xl font-semibold text-ink">My orders</h2><p className="mt-1 text-sm text-slate-500">Orders linked to your verified account. Walk-in orders can be tracked separately.</p></div><button type="button" disabled={loading} onClick={() => setReload((n) => n + 1)} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"><RefreshCw size={15} className={loading ? 'animate-spin' : ''} />Refresh</button></div>
-        <ErrorMessage error={error} retry={() => setReload((n) => n + 1)} />
+        <ErrorMessage error={error || payError} retry={error ? () => setReload((n) => n + 1) : undefined} />
         {loading ? <Loading label={'Loading your orders\u2026'} /> : error ? null : !rows.length ? <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 px-5 py-10 text-center sm:px-8"><span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-white text-brand shadow-sm"><ClipboardList size={25} /></span><h3 className="mt-4 text-lg font-semibold text-ink">No linked orders yet</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-600">When you place an order, ask the shop to attach it using the exact email on your verified SpindleTrack account. It will appear here once linked.</p><Link to="/track-order" className="mt-5 inline-flex min-h-10 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-700">Track a walk-in order <ArrowRight size={15} /></Link></div> : <>
-          <div aria-live="polite" className="space-y-3">{rows.map((order) => <CustomerOrderCard key={order.id} order={order} />)}</div>
+          <div aria-live="polite" className="space-y-3">{rows.map((order) => <CustomerOrderCard key={order.id} order={order} onPayWithPayPal={payWithPayPal} payingOrderId={payingOrderId} />)}</div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4"><p className="text-xs text-slate-500">{`${total} linked order${total === 1 ? '' : 's'} \u00b7 page ${page + 1} of ${pages}`}</p><div className="flex gap-2"><button type="button" disabled={page === 0 || loading} onClick={() => setPage((n) => Math.max(0, n - 1))} className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-semibold disabled:opacity-40">Previous</button><button type="button" disabled={page + 1 >= pages || loading} onClick={() => setPage((n) => Math.min(pages - 1, n + 1))} className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-semibold disabled:opacity-40">Next</button></div></div>
         </>}
       </section>
@@ -222,13 +270,4 @@ export function CustomerOrdersPage({ customerName = '' }) {
       </aside>
     </div>
   </div>;
-}
-
-export function CustomerOrderDetailPage() {
-  const { orderId } = useParams(); const [detail, setDetail] = useState(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [reload, setReload] = useState(0);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const stageRef = useRef(null);
-  useEffect(() => { let active = true; const fetchOrder = (showLoading) => { if (showLoading) setLoading(true); setError(''); return api.get(`/api/me/orders/${encodeURIComponent(orderId)}`).then(({ data }) => { if (active) { const next = normalizeOrderDetailResponse(data); stageRef.current = next.order?.stage || null; setDetail(next); setLastUpdated(new Date()); } }).catch((reason) => { if (active) setError(apiErrorMessage(reason)); }).finally(() => { if (active && showLoading) setLoading(false); }); }; void fetchOrder(true); const refresh = () => { if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return; if (stageRef.current === 'CLAIMED') return; void fetchOrder(false); }; const timer = setInterval(refresh, 30_000); if (typeof document !== 'undefined') document.addEventListener('visibilitychange', refresh); return () => { active = false; clearInterval(timer); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', refresh); }; }, [orderId, reload]);
-  const order = detail?.order;
-  return <><Heading eyebrow="Customer" title={order?.orderCode || 'Order details'} description={order?.shopName ? `Laundry order at ${order.shopName}.` : 'Read-only details for your linked order.'} action={<Link to="/customer/orders" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-semibold"><ArrowLeft size={16} />My orders</Link>} /><ErrorMessage error={error} retry={() => setReload((n) => n + 1)} />{loading && !order ? <Loading label={'Loading your order\u2026'} /> : error && !order ? null : !order ? <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-10 text-center text-sm text-slate-500">Order not found.</div> : <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]"><section className="space-y-5"><article className="rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-7"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-wide text-slate-400">{order.shopName}</p><h2 className="mt-1 text-xl font-semibold text-ink">{order.serviceName}</h2><div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500"><OrderQuantityBadge order={order} /><span>{`\u00b7 Created ${dateTime(order.createdAt)}`}</span></div></div><div className="flex flex-wrap gap-2"><StagePill stage={order.stage} /><PaymentPill status={order.paymentStatus} /></div></div><p className="mt-5 text-2xl font-semibold text-ink">{money(order.totalPrice)}</p>{order.paymentMethod && <p className="mt-1 text-sm text-slate-500">{`Payment method: ${formatOrderPaymentMethod(order)}${order.paidAt ? ` \u00b7 ${dateTime(order.paidAt)}` : ''}`}</p>}</article><article className="rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-7"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold text-ink">Order status</h2><button type="button" disabled={loading} onClick={() => setReload((n) => n + 1)} className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold disabled:opacity-50"><RefreshCw size={14} className={loading ? 'animate-spin' : ''} />Refresh status</button></div><div className="mt-4"><OrderStatusTracker stageHistory={detail.history || []} currentStage={order.stage} showStaffName={false} /></div><p className="mt-3 text-xs text-slate-400">{`${lastUpdated ? `Last updated: ${formatDateTime(lastUpdated)}` : 'Updating\u2026'} \u00b7 Auto-refreshes every 30 seconds while visible.`}</p></article><article className="rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-7"><h2 className="font-semibold text-ink">Payment history</h2>{!(detail.paymentHistory || []).length ? <p className="mt-3 text-sm text-slate-500">No payment events are available yet.</p> : <ol className="mt-4 divide-y divide-slate-100">{detail.paymentHistory.map((event, index) => <li key={`${event.status}-${event.occurredAt || index}`} className="flex flex-wrap items-center justify-between gap-2 py-3"><p className="text-sm font-semibold">{`${paymentStatusLabel(event.status)}${event.method ? ` \u00b7 ${formatPaymentMethod(event.method)}` : ''}`}</p><time className="text-xs text-slate-500">{dateTime(event.occurredAt)}</time></li>)}</ol>}</article></section><aside className="h-fit rounded-3xl border border-slate-100 bg-white p-5 shadow-soft sm:p-6"><p className="text-xs font-bold uppercase tracking-[.16em] text-brand">Current status</p><div className="mt-3"><StagePill stage={order.stage} /></div><p className="mt-3 text-sm leading-6 text-slate-500">For updates about this order, contact {order.shopName} directly.</p></aside></div>}</>;
 }

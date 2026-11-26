@@ -3,9 +3,13 @@ package com.spindletrack.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -179,6 +183,105 @@ class PublicOrderLookupServiceTest {
                         .lookup("O-000123", "639171234567", "198.51.100.9"));
         assertEquals(ambiguous.getReason(), unavailable.getReason());
         verify(inactive.db, never()).collection("orderStageHistory");
+    }
+
+    @Test
+    void publicPayPalRejectsWrongMobileWithGenericNotFoundAndTracksRateLimit() throws Exception {
+        Fixture f = new Fixture();
+        QueryDocumentSnapshot order = mock(QueryDocumentSnapshot.class);
+        when(order.getString("mobile")).thenReturn("639171234567");
+        when(f.rows.getDocuments()).thenReturn(List.of(order));
+        ShopOrderService shopOrders = mock(ShopOrderService.class);
+        PublicOrderLookupService service = new PublicOrderLookupService(f.firebase, f.limits, shopOrders);
+
+        ResponseStatusException createErr = assertThrows(ResponseStatusException.class,
+                () -> service.createPublicPayPalOrder(
+                        new PublicOrderLookupService.PublicPayPalOrderRequest("O-000123", "639171999999", null),
+                        "198.51.100.9"));
+        ResponseStatusException captureErr = assertThrows(ResponseStatusException.class,
+                () -> service.capturePublicPayPalOrder(
+                        new PublicOrderLookupService.PublicPayPalCaptureRequest("O-000123", "639171999999", "PP-1"),
+                        "198.51.100.9"));
+
+        assertEquals(HttpStatus.NOT_FOUND, createErr.getStatusCode());
+        assertEquals(HttpStatus.NOT_FOUND, captureErr.getStatusCode());
+        assertEquals("Order could not be found. Check the order code and mobile number.", createErr.getReason());
+        assertEquals(createErr.getReason(), captureErr.getReason());
+        verify(f.limits, times(2)).recordPublicOrderLookupFailure("198.51.100.9");
+        verify(shopOrders, never()).createPublicPayPalOrder(anyString(), any());
+        verify(shopOrders, never()).capturePublicPayPalOrder(anyString(), any());
+    }
+
+    @Test
+    void publicPayPalRespectsRateLimitingBeforeDatabaseLookup() {
+        Fixture f = mockFixtureSafely();
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+                "Too many order lookup attempts. Please wait 15 minutes and try again."))
+                .when(f.limits).checkPublicOrderLookupLimit("198.51.100.99");
+        ShopOrderService shopOrders = mock(ShopOrderService.class);
+        PublicOrderLookupService service = new PublicOrderLookupService(f.firebase, f.limits, shopOrders);
+
+        ResponseStatusException createLimited = assertThrows(ResponseStatusException.class,
+                () -> service.createPublicPayPalOrder(
+                        new PublicOrderLookupService.PublicPayPalOrderRequest("O-000123", "639171234567", null),
+                        "198.51.100.99"));
+        ResponseStatusException captureLimited = assertThrows(ResponseStatusException.class,
+                () -> service.capturePublicPayPalOrder(
+                        new PublicOrderLookupService.PublicPayPalCaptureRequest("O-000123", "639171234567", "PP-1"),
+                        "198.51.100.99"));
+
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS, createLimited.getStatusCode());
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS, captureLimited.getStatusCode());
+        verify(f.db, never()).collection(anyString());
+        verify(shopOrders, never()).createPublicPayPalOrder(anyString(), any());
+    }
+
+    @Test
+    void publicPayPalCreateAndCaptureVerifyMatchWithoutIncrementingFailures() throws Exception {
+        Fixture f = new Fixture();
+        QueryDocumentSnapshot order = mock(QueryDocumentSnapshot.class);
+        DocumentSnapshot shop = mock(DocumentSnapshot.class);
+        DocumentReference shopRef = mock(DocumentReference.class);
+        CollectionReference shops = mock(CollectionReference.class);
+        when(f.rows.getDocuments()).thenReturn(List.of(order));
+        when(order.getId()).thenReturn("order-walkin-1");
+        when(order.getString("mobile")).thenReturn("639171234567");
+        when(order.getString("shopId")).thenReturn("shop-string-1");
+        when(f.db.collection("shops")).thenReturn(shops);
+        when(shops.document("shop-string-1")).thenReturn(shopRef);
+        when(shopRef.get()).thenReturn(ApiFutures.immediateFuture(shop));
+        when(shop.exists()).thenReturn(true);
+        when(shop.getString("status")).thenReturn("ACTIVE");
+
+        ShopOrderService shopOrders = mock(ShopOrderService.class);
+        ShopOrderService.OrderSummary pendingSummary = new ShopOrderService.OrderSummary(
+                "order-walkin-1", "shop-string-1", "O-000123", "Walk In", "639171234567",
+                null, "svc-1", "Wash", new java.math.BigDecimal("2.00"), new java.math.BigDecimal("100.00"),
+                "", com.spindletrack.LaundryStage.RECEIVED, java.time.Instant.now(), "staff-1",
+                "PENDING", "PAYPAL", null, null, null, "PP-PUB-99",
+                "https://www.sandbox.paypal.com/checkoutnow?token=PP-PUB-99", 10000L, "order-walkin-1");
+        when(shopOrders.createPublicPayPalOrder(eq("order-walkin-1"), any()))
+                .thenReturn(new ShopOrderService.PayPalOrderResult(pendingSummary, "PP-PUB-99",
+                        "https://www.sandbox.paypal.com/checkoutnow?token=PP-PUB-99"));
+        when(shopOrders.capturePublicPayPalOrder(eq("order-walkin-1"), any()))
+                .thenReturn(pendingSummary);
+
+        PublicOrderLookupService service = new PublicOrderLookupService(f.firebase, f.limits, shopOrders);
+        PublicOrderLookupService.PublicPayPalOrderResponse created = service.createPublicPayPalOrder(
+                new PublicOrderLookupService.PublicPayPalOrderRequest("O-000123", "+63 917 123 4567", null),
+                "198.51.100.9");
+        PublicOrderLookupService.PublicPayPalCaptureResponse incomplete = service.capturePublicPayPalOrder(
+                new PublicOrderLookupService.PublicPayPalCaptureRequest("O-000123", "639171234567", "PP-PUB-99"),
+                "198.51.100.9");
+
+        assertEquals("PP-PUB-99", created.paypalOrderId());
+        assertEquals("PENDING", incomplete.paymentStatus());
+        verify(f.limits, never()).recordPublicOrderLookupFailure(anyString());
+    }
+
+    private static Fixture mockFixtureSafely() {
+        try { return new Fixture(); }
+        catch (Exception ex) { throw new IllegalStateException(ex); }
     }
 
     private static final class Fixture {

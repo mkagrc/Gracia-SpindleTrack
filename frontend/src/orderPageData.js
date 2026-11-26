@@ -51,12 +51,29 @@ export function normalizePublicOrderLookup(value) {
     maskedMobile: asText(source.maskedMobile),
     currentStage: asText(source.currentStage),
     paymentStatus: asText(source.paymentStatus),
+    paymentMethodPreference: asText(source.paymentMethodPreference) || null,
+    paymentTiming: asText(source.paymentTiming) || 'PAY_NOW',
     unit: asText(source.quantityUnit) || asText(source.unit),
     quantityUnit: asText(source.quantityUnit) || asText(source.unit),
     billingType: asText(source.billingType),
     quantity: quantity !== null && Number.isFinite(quantity) ? quantity : null,
     stageHistory: Array.isArray(source.stageHistory) ? source.stageHistory : [],
   };
+}
+
+export function isPayPalCheckoutEligible(order) {
+  if (!order) return false;
+  const status = order.paymentStatus || 'UNPAID';
+  if (status === 'PAID') return false;
+  const stage = order.stage || order.currentStage;
+  if (stage === 'CLAIMED') return false;
+  if (order.paymentMethod === 'PAYMONGO') return false;
+  const pref = order.paymentMethodPreference || null;
+  const method = order.paymentMethod || null;
+  const isOnlineOrder = pref === 'ONLINE' || (pref === null && method === 'PAYPAL');
+  if (!isOnlineOrder) return false;
+  const timing = order.paymentTiming || 'PAY_NOW';
+  return timing === 'PAY_NOW' || stage === 'READY';
 }
 
 function normalizeShopRecord(shop) {

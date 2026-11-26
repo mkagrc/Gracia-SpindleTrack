@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  isPayPalCheckoutEligible,
   normalizeOrderDetailResponse,
   normalizePagedRows,
   normalizePublicNearbyResult,
@@ -111,4 +112,28 @@ test('public nearby grouped result normalizes own municipality and nearby groups
     hasOwnMunicipalityShops: false,
     nearbyGroups: [],
   });
+});
+
+test('PayPal checkout eligibility enforces ONLINE preference, timing rules, and unpaid status', () => {
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'UNPAID', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_NOW', stage: 'RECEIVED',
+  }), true);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'PENDING', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_NOW', stage: 'WASHING',
+  }), true);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'UNPAID', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_AT_CLAIM', stage: 'WASHING',
+  }), false);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'UNPAID', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_AT_CLAIM', stage: 'READY',
+  }), true);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'PAID', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_NOW', stage: 'READY',
+  }), false);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'UNPAID', paymentMethodPreference: 'CASH', paymentTiming: 'PAY_NOW', stage: 'READY',
+  }), false);
+  assert.equal(isPayPalCheckoutEligible({
+    paymentStatus: 'PENDING', paymentMethod: 'PAYMONGO', paymentMethodPreference: 'ONLINE', paymentTiming: 'PAY_NOW', stage: 'READY',
+  }), false);
 });

@@ -8,4 +8,8 @@ public interface PayPalGateway {
 
     CreatedOrder createOrder(BigDecimal amount, String orderId, String orderCode);
     CapturedOrder captureOrder(String paypalOrderId);
+
+    default String getOrderStatus(String paypalOrderId) {
+        return "CREATED";
+    }
 }

@@ -82,3 +82,7 @@ PAYPAL_CANCEL_URL=http://localhost:5173/paypal/cancel
 ```
 
 `PAYPAL_RETURN_URL` and `PAYPAL_CANCEL_URL` default to `${FRONTEND_BASE_URL}/paypal/return` and `${FRONTEND_BASE_URL}/paypal/cancel` when omitted. Legacy PayMongo endpoints/webhooks have been removed; existing historical `PAYMONGO` order records remain readable in the UI as `Online payment (PayMongo, legacy)`.
+
+### Payment Role Flow
+- **Customers (`CUSTOMER` & walk-in lookup):** Customers initiate and approve PayPal Sandbox checkout themselves from **My orders**, **Customer order details** (`/api/me/orders/{orderId}/payments/paypal-order` + `paypal-capture`), or the public walk-in lookup (`/api/public/orders/paypal-order` + `paypal-capture` with the same rate limiting and code + mobile check).
+- **Staff (`STAFF`):** Staff never pay orders on PayPal. When creating an **Online payment (PayPal)** + **Pay now** order, staff immediately receive the shareable payment link, copy button, and QR code for the customer. On shop order details, staff only sees **Share PayPal payment link** (which creates or reuses the non-expired PayPal link/QR), **Confirm PayPal payment** (idempotent fallback capture once the customer approves), **Cancel pending payment**, and cash payment actions.

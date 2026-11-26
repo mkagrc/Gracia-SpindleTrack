@@ -44,6 +44,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/health", "/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/public/orders/lookup").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/public/orders/paypal-order", "/api/public/orders/paypal-capture").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/public/shops").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/public/shops/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/session").authenticated()

@@ -168,9 +168,18 @@ public class ShopOrderService {
     public record CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
             BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
             String paymentMethod, Instant paidAt, Instant createdAt, String unit,
-            String billingType, BigDecimal actualWeightKg) {
+            String billingType, BigDecimal actualWeightKg, String paymentMethodPreference,
+            String paymentTiming, String paypalOrderId, String paymentLinkUrl) {
         @JsonProperty("quantity") public BigDecimal quantity() { return kilos; }
         @JsonProperty("quantityUnit") public String quantityUnit() { return unit; }
+        public CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
+                BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
+                String paymentMethod, Instant paidAt, Instant createdAt, String unit,
+                String billingType, BigDecimal actualWeightKg) {
+            this(id, orderCode, shopName, serviceName, kilos, totalPrice, stage, paymentStatus,
+                    paymentMethod, paidAt, createdAt, unit, billingType, actualWeightKg,
+                    null, "PAY_NOW", null, null);
+        }
         public CustomerOrderSummary(String id, String orderCode, String shopName, String serviceName,
                 BigDecimal kilos, BigDecimal totalPrice, LaundryStage stage, String paymentStatus,
                 String paymentMethod, Instant paidAt, Instant createdAt, String unit) {
@@ -577,69 +586,67 @@ public class ShopOrderService {
         return result;
     }
 
+    private static final Duration PAYPAL_ORDER_TTL = Duration.ofMinutes(150);
+
+    private enum PayPalCallerScope { STAFF, CUSTOMER, PUBLIC }
+
+    private record PendingPayPalCandidate(OrderSummary order, String paypalOrderId, String approvalUrl, boolean expiredLocally) {}
+
     public PayPalOrderResult createPayPalOrder(FirebasePrincipal principal, String orderId, PayPalOrderRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
-        String id = requireId(orderId);
+        return createPayPalOrderForTarget(PayPalCallerScope.STAFF, shopId, null, requireId(orderId),
+                principal.uid(), displayName(principal), request);
+    }
+
+    /** Convenience overload for in-process callers. */
+    public PayPalOrderResult createPayPalOrder(FirebasePrincipal principal, String orderId) {
+        return createPayPalOrder(principal, orderId, new PayPalOrderRequest(UUID.randomUUID().toString()));
+    }
+
+    public PayPalOrderResult createCustomerPayPalOrder(FirebasePrincipal principal, String orderId, PayPalOrderRequest request) {
+        requireRole(principal, "CUSTOMER");
+        String userId = requireUserId(principal);
+        return createPayPalOrderForTarget(PayPalCallerScope.CUSTOMER, null, userId, requireId(orderId),
+                principal.uid(), displayName(principal, "Customer"), request);
+    }
+
+    public PayPalOrderResult createPublicPayPalOrder(String orderId, PayPalOrderRequest request) {
+        return createPayPalOrderForTarget(PayPalCallerScope.PUBLIC, null, null, requireId(orderId),
+                "WALKIN", "Walk-in customer", request);
+    }
+
+    private PayPalOrderResult createPayPalOrderForTarget(
+            PayPalCallerScope scope, String expectedShopId, String expectedCustomerUserId,
+            String id, String actorUid, String actorName, PayPalOrderRequest request) {
         String rawRequestId = request == null ? null : request.clientRequestId();
         String clientRequestId = rawRequestId == null || rawRequestId.isBlank()
                 ? UUID.randomUUID().toString()
                 : validateClientRequestId(rawRequestId);
         Firestore db = firebase.firestore();
-        DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
         var requestCollection = order.collection("paymentLinkRequests");
         DocumentReference requestKey = requestCollection == null ? null : requestCollection.document(clientRequestId);
+
+        DocumentSnapshot snapshot = FirestoreSupport.await(order.get());
+        String resolvedShopId = verifyOrderAccessAndActiveShop(db, snapshot, scope, expectedShopId, expectedCustomerUserId);
+        DocumentReference shop = db.collection(SHOPS).document(resolvedShopId);
+
         Instant now = Instant.now();
-        PayPalOrderResult replay = FirestoreSupport.transact(db, tx -> {
-            DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
-            DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
-            DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
-            requireActiveShop(shopSnapshot);
-            requireOwned(current, shopId);
-            if (requestSnapshot != null && requestSnapshot.exists()) {
-                String reqStatus = requestSnapshot.getString("status");
-                if ("COMPLETED".equals(reqStatus)) {
-                    String cachedId = firstNonBlank(requestSnapshot.getString("paypalOrderId"), requestSnapshot.getString("paymentLinkId"));
-                    String cachedUrl = firstNonBlank(requestSnapshot.getString("approvalUrl"), requestSnapshot.getString("paymentLinkUrl"));
-                    return new PayPalOrderResult(mapOrder(current), cachedId, cachedUrl);
-                }
-                if ("CREATING".equals(reqStatus) && !isLockExpired(requestSnapshot, now)) {
-                    throw new ResponseStatusException(HttpStatus.CONFLICT,
-                            "This PayPal payment request is already being processed. Wait a moment and retry.");
-                }
-                // Expired CREATING lease or FAILED lock may be retried safely.
+        PendingPayPalCandidate existingPending = acquireOrInspectPayPalOrder(
+                db, shop, order, requestKey, scope, resolvedShopId, expectedCustomerUserId, id, now, false);
+
+        boolean replacingExpiredPending = false;
+        if (existingPending != null) {
+            boolean inactive = existingPending.expiredLocally()
+                    || isPayPalOrderInactive(gateway().getOrderStatus(existingPending.paypalOrderId()));
+            if (!inactive) {
+                return new PayPalOrderResult(existingPending.order(), existingPending.paypalOrderId(), existingPending.approvalUrl());
             }
-            if ("PENDING".equals(paymentStatus(current))) {
-                String existingId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
-                String existingUrl = current.getString("paymentLinkUrl");
-                if (!existingId.isBlank() && existingUrl != null && !existingUrl.isBlank()
-                        && !"PAYMONGO".equalsIgnoreCase(resolvedPaymentMethod(current))) {
-                    return new PayPalOrderResult(mapOrder(current), existingId, existingUrl);
-                }
-                throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "This order already has a pending payment. Cancel it before creating a new PayPal order.");
-            }
-            if (!"UNPAID".equals(paymentStatus(current)))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "A PayPal order can be created only for an unpaid order.");
-            if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for cash payment.");
-            requirePaymentTiming(current);
-            long cents = Money.toCentavos(orderPrice(current));
-            if (cents < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayPal payments require a total of at least ₱1.00.");
-            if (requestKey != null) {
-                Map<String, Object> lockData = new HashMap<>();
-                lockData.put("shopId", shopId);
-                lockData.put("orderId", id);
-                lockData.put("status", "CREATING");
-                lockData.put("amountCentavos", cents);
-                lockData.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
-                lockData.put("expiresAt", java.util.Date.from(now.plus(PAYMENT_LOCK_LEASE)));
-                tx.set(requestKey, lockData);
-            }
-            return null;
-        });
-        if (replay != null) return replay;
+            replacingExpiredPending = true;
+            acquireOrInspectPayPalOrder(
+                    db, shop, order, requestKey, scope, resolvedShopId, expectedCustomerUserId, id, now, true);
+        }
 
         try {
             DocumentSnapshot initialOrder = FirestoreSupport.await(order.get());
@@ -654,19 +661,29 @@ public class ShopOrderService {
             }
             DocumentReference payment = db.collection(PAYMENTS).document("online-" + clientRequestId);
             String paymentRecordId = payment.getId();
+            Instant expiresAt = Instant.now().plus(PAYPAL_ORDER_TTL);
+            final boolean allowReplacePending = replacingExpiredPending;
             OrderSummary updated = FirestoreSupport.transact(db, tx -> {
                 DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
                 DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
                 DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
                 requireActiveShop(shopSnapshot);
-                requireOwned(current, shopId);
-                if (requestSnapshot != null && requestSnapshot.exists() && "COMPLETED".equals(requestSnapshot.getString("status")))
-                    return mapOrder(current);
+                verifyOrderAccess(current, scope, resolvedShopId, expectedCustomerUserId);
+                String currentStatus = paymentStatus(current);
+                if (requestSnapshot != null && requestSnapshot.exists() && "COMPLETED".equals(requestSnapshot.getString("status"))) {
+                    String cachedId = firstNonBlank(requestSnapshot.getString("paypalOrderId"), requestSnapshot.getString("paymentLinkId"));
+                    String currentPaypalId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
+                    if ("PENDING".equals(currentStatus) && cachedId.equals(currentPaypalId)) {
+                        return mapOrder(current);
+                    }
+                }
                 if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is no longer configured for online payment.");
                 requirePaymentTiming(current);
-                if (!"UNPAID".equals(paymentStatus(current)) || orderPrice(current).compareTo(total) != 0)
+                boolean canCommit = "UNPAID".equals(currentStatus) || (allowReplacePending && "PENDING".equals(currentStatus));
+                if (!canCommit || orderPrice(current).compareTo(total) != 0)
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "The order changed before its PayPal order was created. Refresh and try again.");
+                String previousRecordId = "PENDING".equals(currentStatus) ? current.getString("paymentRecordId") : null;
                 Map<String, Object> values = new HashMap<>();
                 values.put("paymentStatus", "PENDING");
                 values.put("paymentMethod", "PAYPAL");
@@ -676,6 +693,7 @@ public class ShopOrderService {
                 values.put("paymentAmountCentavos", amountCentavos);
                 values.put("paymentOrderIdReference", id);
                 values.put("paymentRecordId", paymentRecordId);
+                values.put("paypalOrderExpiresAt", java.util.Date.from(expiresAt));
                 values.put("updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
                 tx.update(order, values);
                 if (requestKey != null) {
@@ -688,7 +706,11 @@ public class ShopOrderService {
                     completedLock.put("completedAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
                     tx.update(requestKey, completedLock);
                 }
-                Map<String, Object> paymentDoc = paymentRecord(shopId, id, total, "PAYPAL", "PENDING", principal.uid(), displayName(principal), created.id());
+                if (previousRecordId != null && !previousRecordId.isBlank() && !previousRecordId.equals(paymentRecordId)) {
+                    tx.update(db.collection(PAYMENTS).document(previousRecordId), Map.of(
+                            "status", "EXPIRED", "updatedAt", com.google.cloud.firestore.FieldValue.serverTimestamp()));
+                }
+                Map<String, Object> paymentDoc = paymentRecord(resolvedShopId, id, total, "PAYPAL", "PENDING", actorUid, actorName, created.id());
                 paymentDoc.put("paypalOrderId", created.id());
                 paymentDoc.put("currency", "PHP");
                 paymentDoc.put("amount", total.doubleValue());
@@ -702,23 +724,97 @@ public class ShopOrderService {
         }
     }
 
-    /** Convenience overload for in-process callers. */
-    public PayPalOrderResult createPayPalOrder(FirebasePrincipal principal, String orderId) {
-        return createPayPalOrder(principal, orderId, new PayPalOrderRequest(UUID.randomUUID().toString()));
+    private PendingPayPalCandidate acquireOrInspectPayPalOrder(
+            Firestore db, DocumentReference shop, DocumentReference order, DocumentReference requestKey,
+            PayPalCallerScope scope, String shopId, String customerUserId, String id, Instant now,
+            boolean replaceExpiredPending) {
+        return FirestoreSupport.transact(db, tx -> {
+            DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
+            DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
+            DocumentSnapshot requestSnapshot = requestKey == null ? null : FirestoreSupport.await(tx.get(requestKey));
+            requireActiveShop(shopSnapshot);
+            verifyOrderAccess(current, scope, shopId, customerUserId);
+            String currentStatus = paymentStatus(current);
+            if (requestSnapshot != null && requestSnapshot.exists()) {
+                String reqStatus = requestSnapshot.getString("status");
+                if ("COMPLETED".equals(reqStatus)) {
+                    String cachedId = firstNonBlank(requestSnapshot.getString("paypalOrderId"), requestSnapshot.getString("paymentLinkId"));
+                    String cachedUrl = firstNonBlank(requestSnapshot.getString("approvalUrl"), requestSnapshot.getString("paymentLinkUrl"));
+                    String currentPaypalId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
+                    if ("PENDING".equals(currentStatus) && !cachedId.isBlank() && cachedId.equals(currentPaypalId) && !replaceExpiredPending) {
+                        boolean expiredLocally = isPayPalOrderExpiredLocally(current.get("paypalOrderExpiresAt"), now);
+                        return new PendingPayPalCandidate(mapOrder(current), cachedId, cachedUrl, expiredLocally);
+                    }
+                }
+                if ("CREATING".equals(reqStatus) && !isLockExpired(requestSnapshot, now)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "This PayPal payment request is already being processed. Wait a moment and retry.");
+                }
+            }
+            if (paymentMethodPreference(current) != null && !"ONLINE".equals(paymentMethodPreference(current)))
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is configured for cash payment.");
+            requirePaymentTiming(current);
+            if ("PENDING".equals(currentStatus)) {
+                if ("PAYMONGO".equalsIgnoreCase(resolvedPaymentMethod(current))) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "This order already has a pending payment. Cancel it before creating a new PayPal order.");
+                }
+                if (!replaceExpiredPending) {
+                    String existingId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
+                    String existingUrl = current.getString("paymentLinkUrl");
+                    if (!existingId.isBlank() && existingUrl != null && !existingUrl.isBlank()) {
+                        boolean expiredLocally = isPayPalOrderExpiredLocally(current.get("paypalOrderExpiresAt"), now);
+                        return new PendingPayPalCandidate(mapOrder(current), existingId, existingUrl, expiredLocally);
+                    }
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "This order already has a pending payment. Cancel it before creating a new PayPal order.");
+                }
+            } else if (!"UNPAID".equals(currentStatus)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "A PayPal order can be created only for an unpaid order.");
+            }
+            long cents = Money.toCentavos(orderPrice(current));
+            if (cents < 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayPal payments require a total of at least ₱1.00.");
+            if (requestKey != null) {
+                Map<String, Object> lockData = new HashMap<>();
+                lockData.put("shopId", shopId);
+                lockData.put("orderId", id);
+                lockData.put("status", "CREATING");
+                lockData.put("amountCentavos", cents);
+                lockData.put("createdAt", com.google.cloud.firestore.FieldValue.serverTimestamp());
+                lockData.put("expiresAt", java.util.Date.from(now.plus(PAYMENT_LOCK_LEASE)));
+                tx.set(requestKey, lockData);
+            }
+            return null;
+        });
     }
 
     public OrderSummary capturePayPalOrder(FirebasePrincipal principal, String orderId, PayPalCaptureRequest request) {
         requireRole(principal, "STAFF");
         String shopId = requireShop(principal.shopId());
-        String id = requireId(orderId);
+        return capturePayPalOrderForTarget(PayPalCallerScope.STAFF, shopId, null, requireId(orderId), request, false);
+    }
+
+    public OrderSummary captureCustomerPayPalOrder(FirebasePrincipal principal, String orderId, PayPalCaptureRequest request) {
+        requireRole(principal, "CUSTOMER");
+        String userId = requireUserId(principal);
+        return capturePayPalOrderForTarget(PayPalCallerScope.CUSTOMER, null, userId, requireId(orderId), request, true);
+    }
+
+    public OrderSummary capturePublicPayPalOrder(String orderId, PayPalCaptureRequest request) {
+        return capturePayPalOrderForTarget(PayPalCallerScope.PUBLIC, null, null, requireId(orderId), request, true);
+    }
+
+    private OrderSummary capturePayPalOrderForTarget(
+            PayPalCallerScope scope, String expectedShopId, String expectedCustomerUserId,
+            String id, PayPalCaptureRequest request, boolean requireRequestedPaypalOrderId) {
         String requestedPaypalOrderId = request == null || request.paypalOrderId() == null || request.paypalOrderId().isBlank()
                 ? null : request.paypalOrderId().trim();
         Firestore db = firebase.firestore();
-        DocumentReference shop = db.collection(SHOPS).document(shopId);
         DocumentReference order = db.collection(ORDERS).document(id);
         DocumentSnapshot before = FirestoreSupport.await(order.get());
-        requireOwned(before, shopId);
-        requireActiveShop(FirestoreSupport.await(shop.get()));
+        String resolvedShopId = verifyOrderAccessAndActiveShop(db, before, scope, expectedShopId, expectedCustomerUserId);
+        DocumentReference shop = db.collection(SHOPS).document(resolvedShopId);
+
         String storedPaypalId = firstNonBlank(before.getString("paypalOrderId"), before.getString("paymentLinkId"));
         if (isPaid(before)) {
             String method = resolvedPaymentMethod(before);
@@ -726,14 +822,26 @@ public class ShopOrderService {
                     && (requestedPaypalOrderId == null || requestedPaypalOrderId.equals(storedPaypalId))) {
                 return mapOrder(before);
             }
+            if (scope == PayPalCallerScope.PUBLIC) {
+                return mapOrder(before);
+            }
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
         }
         if (!"PENDING".equals(paymentStatus(before))) {
+            if (scope == PayPalCallerScope.PUBLIC) {
+                return mapOrder(before);
+            }
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This order has no pending PayPal payment.");
         }
         if (storedPaypalId.isBlank() || "PAYMONGO".equalsIgnoreCase(resolvedPaymentMethod(before))) {
+            if (scope == PayPalCallerScope.PUBLIC) {
+                return mapOrder(before);
+            }
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "This order has no PayPal order ID. Cancel the legacy pending link and start a new PayPal payment.");
+        }
+        if (requireRequestedPaypalOrderId && requestedPaypalOrderId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "PayPal order token is required.");
         }
         if (requestedPaypalOrderId != null && !requestedPaypalOrderId.equals(storedPaypalId)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -742,6 +850,9 @@ public class ShopOrderService {
 
         PayPalGateway.CapturedOrder captured = gateway().captureOrder(storedPaypalId);
         if (!matchesCapturedOrder(before, storedPaypalId, captured)) {
+            if (scope == PayPalCallerScope.PUBLIC) {
+                return mapOrder(before);
+            }
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "PayPal has not completed a payment matching this order's currency and total amount.");
         }
@@ -752,7 +863,7 @@ public class ShopOrderService {
             DocumentSnapshot shopSnapshot = FirestoreSupport.await(tx.get(shop));
             DocumentSnapshot current = FirestoreSupport.await(tx.get(order));
             requireActiveShop(shopSnapshot);
-            requireOwned(current, shopId);
+            verifyOrderAccess(current, scope, resolvedShopId, expectedCustomerUserId);
             String currentPaypalId = firstNonBlank(current.getString("paypalOrderId"), current.getString("paymentLinkId"));
             if (isPaid(current)) {
                 String method = resolvedPaymentMethod(current);
@@ -760,10 +871,16 @@ public class ShopOrderService {
                         && currentPaypalId.equals(storedPaypalId)) {
                     return mapOrder(current);
                 }
+                if (scope == PayPalCallerScope.PUBLIC) {
+                    return mapOrder(current);
+                }
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already paid.");
             }
             if (!"PENDING".equals(paymentStatus(current)) || !storedPaypalId.equals(currentPaypalId)
                     || !matchesCapturedOrder(current, storedPaypalId, captured)) {
+                if (scope == PayPalCallerScope.PUBLIC) {
+                    return mapOrder(current);
+                }
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "The pending payment changed before capture. Refresh the order.");
             }
             Map<String, Object> update = new HashMap<>();
@@ -789,6 +906,42 @@ public class ShopOrderService {
             }
             return withPayment(mapOrder(current), "PAID", "PAYPAL", paidAt, "PAYPAL", "PayPal Sandbox");
         });
+    }
+
+    private String verifyOrderAccessAndActiveShop(
+            Firestore db, DocumentSnapshot order, PayPalCallerScope scope,
+            String expectedShopId, String expectedCustomerUserId) {
+        verifyOrderAccess(order, scope, expectedShopId, expectedCustomerUserId);
+        String resolvedShopId = scope == PayPalCallerScope.STAFF ? expectedShopId : order.getString("shopId");
+        if (resolvedShopId == null || resolvedShopId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop was not found.");
+        }
+        requireActiveShop(FirestoreSupport.await(db.collection(SHOPS).document(resolvedShopId).get()));
+        return resolvedShopId;
+    }
+
+    private static void verifyOrderAccess(
+            DocumentSnapshot order, PayPalCallerScope scope, String expectedShopId, String expectedCustomerUserId) {
+        if (scope == PayPalCallerScope.STAFF) {
+            requireOwned(order, expectedShopId);
+        } else if (scope == PayPalCallerScope.CUSTOMER) {
+            if (!order.exists() || !expectedCustomerUserId.equals(order.getString("customerUserId"))) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order was not found.");
+            }
+        } else if (!order.exists()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order was not found.");
+        }
+    }
+
+    private static boolean isPayPalOrderExpiredLocally(Object rawExpiresAt, Instant now) {
+        Instant expiresAt = instant(rawExpiresAt);
+        return expiresAt != null && now.isAfter(expiresAt);
+    }
+
+    private static boolean isPayPalOrderInactive(String paypalStatus) {
+        if (paypalStatus == null || paypalStatus.isBlank()) return false;
+        String upper = paypalStatus.trim().toUpperCase(Locale.ROOT);
+        return "VOIDED".equals(upper) || "EXPIRED".equals(upper) || "CANCELLED".equals(upper) || "DECLINED".equals(upper);
     }
 
     public OrderSummary cancelPaymentLink(FirebasePrincipal principal, String orderId) {
@@ -1000,6 +1153,7 @@ public class ShopOrderService {
         values.put("paymentAmountCentavos", com.google.cloud.firestore.FieldValue.delete());
         values.put("paymentOrderIdReference", com.google.cloud.firestore.FieldValue.delete());
         values.put("paymentRecordId", com.google.cloud.firestore.FieldValue.delete());
+        values.put("paypalOrderExpiresAt", com.google.cloud.firestore.FieldValue.delete());
     }
 
     private static CustomerOrderSummary customerSummary(Firestore db, DocumentSnapshot order) {
@@ -1009,11 +1163,22 @@ public class ShopOrderService {
             DocumentSnapshot shop = FirestoreSupport.await(db.collection(SHOPS).document(shopId).get());
             if (shop.exists() && shop.getString("name") != null && !shop.getString("name").isBlank()) shopName = shop.getString("name");
         }
+        String status = paymentStatus(order);
+        String method = resolvedPaymentMethod(order);
+        String paypalOrderId = null;
+        String paymentLinkUrl = null;
+        if ("PENDING".equals(status) && !"PAYMONGO".equalsIgnoreCase(method)) {
+            String rawId = firstNonBlank(order.getString("paypalOrderId"), order.getString("paymentLinkId"));
+            String rawUrl = order.getString("paymentLinkUrl");
+            if (!rawId.isBlank()) paypalOrderId = rawId;
+            if (rawUrl != null && !rawUrl.isBlank()) paymentLinkUrl = rawUrl;
+        }
         return new CustomerOrderSummary(order.getId(), order.getString("orderCode"), shopName,
                 order.getString("serviceName"), orderQuantity(order), orderPrice(order),
-                parseStage(order.getString("stage")), paymentStatus(order), resolvedPaymentMethod(order),
+                parseStage(order.getString("stage")), status, method,
                 instant(order.get("paidAt")), instant(order.get("createdAt")), orderUnit(order),
-                orderBillingType(order), nullableDecimal(order.get("actualWeightKg")));
+                orderBillingType(order), nullableDecimal(order.get("actualWeightKg")),
+                paymentMethodPreference(order), paymentTiming(order), paypalOrderId, paymentLinkUrl);
     }
 
     private static OrderSummary mapOrder(DocumentSnapshot snapshot) {
@@ -1266,7 +1431,8 @@ public class ShopOrderService {
         return id;
     }
     private static String userId(FirebasePrincipal principal) { return principal.userId() == null ? principal.uid() : principal.userId(); }
-    private static String displayName(FirebasePrincipal principal) { return principal.displayName() == null || principal.displayName().isBlank() ? "Staff" : principal.displayName().trim(); }
+    private static String displayName(FirebasePrincipal principal) { return displayName(principal, "Staff"); }
+    private static String displayName(FirebasePrincipal principal, String fallback) { return principal == null || principal.displayName() == null || principal.displayName().isBlank() ? fallback : principal.displayName().trim(); }
     private static String firstNonBlank(String first, String fallback) { return first == null || first.isBlank() ? (fallback == null ? "" : fallback.trim()) : first.trim(); }
     private static String normalizeMobile(String value) { return value == null ? "" : value.replaceAll("\\D", ""); }
 }
